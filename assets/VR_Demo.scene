@@ -1,0 +1,263 @@
+Scene: VR_Demo
+Entities:
+  # ---------------------------------------------------------------
+  # FLOOR — 20x20 m grey quad, static rigid body + box collider.
+  # ---------------------------------------------------------------
+  - Entity: 1001
+    Name: Floor
+    TransformComponent:
+      Translation: [0.0, 0.0, 0.0]
+      Rotation:    [-1.5707963, 0.0, 0.0]
+      Scale:       [20.0, 20.0, 1.0]
+    SpriteRendererComponent:
+      Color:        [0.45, 0.45, 0.50, 1.0]
+      TilingFactor: 4.0
+    RigidBodyComponent:
+      Type: 0
+      FixedRotation: true
+      Mass: 0.0
+      Friction: 0.8
+      RollingFriction: 0.1
+      SpinningFriction: 0.1
+      Restitution: 0.0
+    BoxColliderComponent:
+      Offset: [0.0, 0.0, 0.0]
+      Size:   [20.0, 20.0, 0.1]
+      Density: 1.0
+      Friction: 0.8
+      Restitution: 0.0
+      RestitutionThreshold: 0.5
+
+  # ---------------------------------------------------------------
+  # PLAYER (VR RIG) — entity with VRRigComponent. PreviewMode ON
+  # so it works without a headset. Position is the floor-level
+  # origin; the VRRigSystem will overwrite Translation each frame
+  # to match the HMD (or the preview camera).
+  # ---------------------------------------------------------------
+  - Entity: 1002
+    Name: Player
+    TransformComponent:
+      Translation: [0.0, 1.7, 3.0]
+      Rotation:    [0.0, 0.0, 0.0]
+      Scale:       [1.0, 1.0, 1.0]
+    CameraComponent:
+      ProjectionType:    0
+      Primary:           true
+      FixedAspectRatio:  false
+      AntiAliasing:      true
+      FrustumCulling:    true
+      PerspectiveFOV:    90.0
+      PerspectiveNear:   0.05
+      PerspectiveFar:    500.0
+      OrthographicNear: -1.0
+      OrthographicFar:   1.0
+    VRRigComponent:
+      Locomotion:               0
+      MoveSpeed:                3.0
+      SnapAngleDeg:             45.0
+      ComfortVignette:          true
+      ShowControllerMeshes:     true
+      LeftControllerMeshPath:   ""
+      RightControllerMeshPath:  ""
+      PreviewMode:              true
+      PreviewFOV:               90.0
+      PlayerHeight:             1.7
+    RelationshipComponent:
+      Parent: 0
+      Children:
+        - 1003
+        - 1004
+
+  # ---------------------------------------------------------------
+  # LEFT HAND — child of Player. Small cyan cube. VRRigSystem
+  # updates its Transform from the left controller grip pose.
+  # ---------------------------------------------------------------
+  - Entity: 1003
+    Name: LeftHand
+    TransformComponent:
+      Translation: [-0.2, 1.4, 2.8]
+      Rotation:    [0.0, 0.0, 0.0]
+      Scale:       [0.08, 0.08, 0.15]
+    SpriteRendererComponent:
+      Color:        [0.30, 0.85, 1.00, 1.0]
+      TilingFactor: 1.0
+    RelationshipComponent:
+      Parent: 1002
+      Children: []
+
+  # ---------------------------------------------------------------
+  # RIGHT HAND — child of Player. Small magenta cube.
+  # ---------------------------------------------------------------
+  - Entity: 1004
+    Name: RightHand
+    TransformComponent:
+      Translation: [0.2, 1.4, 2.8]
+      Rotation:    [0.0, 0.0, 0.0]
+      Scale:       [0.08, 0.08, 0.15]
+    SpriteRendererComponent:
+      Color:        [1.00, 0.30, 0.75, 1.0]
+      TilingFactor: 1.0
+    RelationshipComponent:
+      Parent: 1002
+      Children: []
+
+  # ---------------------------------------------------------------
+  # PROP — orange cube at left.
+  # ---------------------------------------------------------------
+  - Entity: 1005
+    Name: Cube_Orange
+    TransformComponent:
+      Translation: [-2.5, 0.5, 0.0]
+      Rotation:    [0.0, 0.4, 0.0]
+      Scale:       [1.0, 1.0, 1.0]
+    SpriteRendererComponent:
+      Color:        [1.00, 0.55, 0.20, 1.0]
+      TilingFactor: 1.0
+    RigidBodyComponent:
+      Type: 1
+      FixedRotation: false
+      Mass: 1.0
+      Friction: 0.6
+      RollingFriction: 0.05
+      SpinningFriction: 0.05
+      Restitution: 0.3
+    BoxColliderComponent:
+      Offset: [0.0, 0.0, 0.0]
+      Size:   [1.0, 1.0, 1.0]
+      Density: 1.0
+      Friction: 0.6
+      Restitution: 0.3
+      RestitutionThreshold: 0.5
+
+  # ---------------------------------------------------------------
+  # PROP — green cube in front, raised pedestal.
+  # ---------------------------------------------------------------
+  - Entity: 1006
+    Name: Cube_Green
+    TransformComponent:
+      Translation: [0.0, 1.0, -2.0]
+      Rotation:    [0.0, 0.0, 0.0]
+      Scale:       [0.8, 0.8, 0.8]
+    SpriteRendererComponent:
+      Color:        [0.30, 0.85, 0.40, 1.0]
+      TilingFactor: 1.0
+    RigidBodyComponent:
+      Type: 1
+      FixedRotation: false
+      Mass: 1.0
+      Friction: 0.6
+      RollingFriction: 0.05
+      SpinningFriction: 0.05
+      Restitution: 0.4
+    BoxColliderComponent:
+      Offset: [0.0, 0.0, 0.0]
+      Size:   [0.8, 0.8, 0.8]
+      Density: 1.0
+      Friction: 0.6
+      Restitution: 0.4
+      RestitutionThreshold: 0.5
+
+  # ---------------------------------------------------------------
+  # PROP — blue cube at right, tall pillar.
+  # ---------------------------------------------------------------
+  - Entity: 1007
+    Name: Cube_Blue
+    TransformComponent:
+      Translation: [2.5, 1.0, 0.5]
+      Rotation:    [0.0, -0.2, 0.0]
+      Scale:       [0.6, 2.0, 0.6]
+    SpriteRendererComponent:
+      Color:        [0.30, 0.55, 1.00, 1.0]
+      TilingFactor: 1.0
+    RigidBodyComponent:
+      Type: 0
+      FixedRotation: true
+      Mass: 0.0
+      Friction: 0.7
+      RollingFriction: 0.05
+      SpinningFriction: 0.05
+      Restitution: 0.0
+    BoxColliderComponent:
+      Offset: [0.0, 0.0, 0.0]
+      Size:   [0.6, 2.0, 0.6]
+      Density: 1.0
+      Friction: 0.7
+      Restitution: 0.0
+      RestitutionThreshold: 0.5
+
+  # ---------------------------------------------------------------
+  # PROP — yellow cube, low pedestal in back.
+  # ---------------------------------------------------------------
+  - Entity: 1008
+    Name: Cube_Yellow
+    TransformComponent:
+      Translation: [-1.5, 0.4, -3.0]
+      Rotation:    [0.0, 0.8, 0.0]
+      Scale:       [0.7, 0.7, 0.7]
+    SpriteRendererComponent:
+      Color:        [1.00, 0.90, 0.30, 1.0]
+      TilingFactor: 1.0
+    RigidBodyComponent:
+      Type: 0
+      FixedRotation: true
+      Mass: 0.0
+      Friction: 0.6
+      RollingFriction: 0.05
+      SpinningFriction: 0.05
+      Restitution: 0.2
+    BoxColliderComponent:
+      Offset: [0.0, 0.0, 0.0]
+      Size:   [0.7, 0.7, 0.7]
+      Density: 1.0
+      Friction: 0.6
+      Restitution: 0.2
+      RestitutionThreshold: 0.5
+
+  # ---------------------------------------------------------------
+  # SUN — directional light. Cast shadows on the floor and props.
+  # ---------------------------------------------------------------
+  - Entity: 1009
+    Name: Sun
+    TransformComponent:
+      Translation: [0.0, 8.0, 4.0]
+      Rotation:    [-0.9, 0.5, 0.0]
+      Scale:       [1.0, 1.0, 1.0]
+    LightComponent:
+      Type: 0
+      Color: [1.0, 0.96, 0.88]
+      Intensity: 3.5
+      Radius: 50.0
+      CastShadows: true
+      ShadowDistance: 30.0
+      ShadowBias: 1.0
+      ShadowPCFRadius: 2
+      SpotInner: 25.0
+      SpotOuter: 35.0
+      AreaSize: [2.0, 2.0]
+
+  # ---------------------------------------------------------------
+  # AMBIENT FILL — point light near the center to soften shadows.
+  # ---------------------------------------------------------------
+  - Entity: 1010
+    Name: Fill_Light
+    TransformComponent:
+      Translation: [0.0, 3.0, 0.0]
+      Rotation:    [0.0, 0.0, 0.0]
+      Scale:       [1.0, 1.0, 1.0]
+    LightComponent:
+      Type: 1
+      Color: [0.5, 0.7, 1.0]
+      Intensity: 1.5
+      Radius: 8.0
+      CastShadows: false
+      ShadowDistance: 10.0
+      ShadowBias: 1.0
+      ShadowPCFRadius: 2
+      SpotInner: 25.0
+      SpotOuter: 35.0
+      AreaSize: [2.0, 2.0]
+
+Gravity: [0.0, -9.81, 0.0]
+SkyColor: [0.45, 0.65, 0.85]
+AmbientColor: [0.65, 0.75, 0.95]
+AmbientIntensity: 0.35

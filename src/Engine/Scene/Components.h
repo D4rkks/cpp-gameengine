@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../Core/EngineAPI.h"
 #include "../Core/UUID.h"
 #include "../Renderer/Mesh.h"
 #include "../Renderer/Texture.h"
@@ -65,7 +66,6 @@ struct ButtonComponent {
   glm::vec4 HoverColor = {1.0f, 1.0f, 1.0f, 1.0f};
   glm::vec4 ClickedColor = {0.6f, 0.6f, 0.6f, 1.0f};
 
-  // Runtime State
   bool IsHovered = false;
   bool IsClicked = false;
 
@@ -120,13 +120,23 @@ struct MeshRendererComponent {
   std::shared_ptr<Texture2D> NormalMap;
   std::string NormalPath;
 
+  float Metallic  = 0.0f;
+  float Roughness = 0.5f;
+  float AO        = 1.0f;
+  bool  CastsShadow = true;
+  bool  ReceivesShadow = true;
+  bool  ReceivesSSR = true;
+  float SSRIntensity = 1.0f;
+
+  bool  IsReflective = false;
+
   MeshRendererComponent() = default;
   MeshRendererComponent(const MeshRendererComponent &) = default;
 };
 
 class Entity;
 
-class ScriptableEntity {
+class ENGINE_API ScriptableEntity {
 public:
   virtual ~ScriptableEntity() {}
 
@@ -223,6 +233,65 @@ struct CameraComponent {
   }
 };
 
+struct ParticleSystemComponent {
+  int   MaxParticles    = 200;
+  float EmitRate        = 30.0f;
+  float Lifetime        = 2.5f;
+  glm::vec3 StartVelocity      = {0.0f, 2.0f, 0.0f};
+  glm::vec3 VelocityVariance   = {1.0f, 0.5f, 1.0f};
+  glm::vec3 Gravity            = {0.0f, -3.0f, 0.0f};
+  float StartSize        = 0.3f;
+  float EndSize          = 0.0f;
+  glm::vec4 StartColor   = {1.0f, 0.6f, 0.1f, 1.0f};
+  glm::vec4 EndColor     = {0.0f, 0.0f, 0.0f, 0.0f};
+  bool  Loop             = true;
+  bool  WorldSpace       = true;
+  bool  AdditiveBlend    = true;
+  std::string TexturePath;
+  std::shared_ptr<Texture2D> Texture;
+
+  struct Particle {
+    glm::vec3 Pos;
+    glm::vec3 Vel;
+    float Age = 0.0f;
+    float MaxAge = 0.0f;
+    float Size = 0.0f;
+    glm::vec4 Color{1.0f};
+  };
+  std::vector<Particle> Particles;
+  float EmitAccumulator = 0.0f;
+  bool  Initialized     = false;
+
+  ParticleSystemComponent() = default;
+  ParticleSystemComponent(const ParticleSystemComponent &) = default;
+};
+
+struct WaterComponent {
+
+  glm::vec3 ShallowColor = {0.10f, 0.45f, 0.55f};
+  glm::vec3 DeepColor    = {0.02f, 0.10f, 0.20f};
+  glm::vec3 FoamColor    = {0.95f, 0.97f, 1.00f};
+  float WaveAmplitude  = 0.18f;
+  float WaveSteepness  = 0.6f;
+  float WaveSpeed      = 1.0f;
+  float WaveScale      = 1.5f;
+  float FresnelPower   = 5.0f;
+  float Refraction     = 0.05f;
+  float DepthFade      = 4.0f;
+  float FoamThreshold  = 0.4f;
+  WaterComponent() = default;
+  WaterComponent(const WaterComponent &) = default;
+};
+
+struct MeshColliderComponent {
+
+  bool  Convex = false;
+  void *RuntimeShape = nullptr;
+  void *RuntimeMesh  = nullptr;
+  MeshColliderComponent() = default;
+  MeshColliderComponent(const MeshColliderComponent &) = default;
+};
+
 struct BoxColliderComponent {
   glm::vec3 Offset = {0.0f, 0.0f, 0.0f};
   glm::vec3 Size = {0.5f, 0.5f, 0.5f};
@@ -238,13 +307,43 @@ struct BoxColliderComponent {
   BoxColliderComponent(const BoxColliderComponent &) = default;
 };
 
+struct SphereColliderComponent {
+  glm::vec3 Offset = {0.0f, 0.0f, 0.0f};
+  float Radius = 0.5f;
+  float Friction = 0.5f;
+  float Restitution = 0.0f;
+  void *RuntimeShape = nullptr;
+  SphereColliderComponent() = default;
+  SphereColliderComponent(const SphereColliderComponent &) = default;
+};
+
+struct CapsuleColliderComponent {
+  glm::vec3 Offset = {0.0f, 0.0f, 0.0f};
+  float Radius = 0.4f;
+  float Height = 1.0f;
+  float Friction = 0.5f;
+  float Restitution = 0.0f;
+  void *RuntimeShape = nullptr;
+  CapsuleColliderComponent() = default;
+  CapsuleColliderComponent(const CapsuleColliderComponent &) = default;
+};
+
 struct LightComponent {
-  enum class LightType { Directional = 0, Point = 1 };
+  enum class LightType { Directional = 0, Point = 1, Spot = 2, Area = 3 };
   LightType Type = LightType::Directional;
+
+  float SpotInner = 25.0f;
+  float SpotOuter = 35.0f;
+
+  glm::vec2 AreaSize = { 2.0f, 2.0f };
   glm::vec3 Color = {1.0f, 1.0f, 1.0f};
   float Intensity = 1.0f;
 
   float Radius = 10.0f;
+  bool CastShadows = true;
+  float ShadowDistance = 25.0f;
+  float ShadowBias = 1.0f;
+  int ShadowPCFRadius = 2;
 
   LightComponent() = default;
   LightComponent(const LightComponent &) = default;
@@ -272,6 +371,23 @@ struct AudioSourceComponent {
 
   AudioSourceComponent() = default;
   AudioSourceComponent(const AudioSourceComponent &) = default;
+};
+
+struct VRRigComponent {
+  enum class LocomotionMode { SmoothMove = 0, Teleport = 1 };
+  LocomotionMode Locomotion        = LocomotionMode::SmoothMove;
+  float          MoveSpeed         = 3.0f;
+  float          SnapAngleDeg      = 45.0f;
+  bool           ComfortVignette   = true;
+  bool           ShowControllerMeshes = false;
+  std::string    LeftControllerMeshPath;
+  std::string    RightControllerMeshPath;
+  bool           PreviewMode       = false;
+  float          PreviewFOV        = 90.0f;
+  float          PlayerHeight      = 1.7f;
+
+  VRRigComponent() = default;
+  VRRigComponent(const VRRigComponent &) = default;
 };
 
 }

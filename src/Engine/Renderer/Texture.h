@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,9 @@ public:
   Texture2D(const std::string &path);
   Texture2D(uint32_t width, uint32_t height);
   ~Texture2D();
+
+  static std::shared_ptr<Texture2D> GetOrLoad(const std::string &path);
+  static void ClearCache();
 
   uint32_t GetID() const { return m_RendererID; }
   void SetData(void *data, uint32_t size);

@@ -10,7 +10,6 @@ namespace Engine {
 Font::Font(const std::string &filepath, float fontSize)
     : m_FilePath(filepath), m_FontSize(fontSize) {
 
-
   std::ifstream file(filepath, std::ios::binary | std::ios::ate);
   if (!file.is_open()) {
     std::cout << "[Font] Failed to open font file: " << filepath << std::endl;

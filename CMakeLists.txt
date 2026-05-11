@@ -44,8 +44,12 @@ FetchContent_MakeAvailable(imgui)
 FetchContent_Declare(
     imguizmo
     URL https://github.com/CedricGuillemet/ImGuizmo/archive/refs/heads/master.zip
+    PATCH_COMMAND powershell -ExecutionPolicy Bypass -File ${CMAKE_SOURCE_DIR}/cmake/patch_imguizmo.ps1
 )
-FetchContent_MakeAvailable(imguizmo)
+FetchContent_GetProperties(imguizmo)
+if(NOT imguizmo_POPULATED)
+    FetchContent_Populate(imguizmo)
+endif()
 
 # -----------------------------------------------------------------------------
 # TinyObjLoader
@@ -93,6 +97,22 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(yaml-cpp)
 
 # -----------------------------------------------------------------------------
+# OpenXR SDK (VR support — headers + loader)
+# -----------------------------------------------------------------------------
+set(DYNAMIC_LOADER OFF CACHE BOOL "" FORCE)
+set(BUILD_API_LAYERS OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BUILD_LOADER ON CACHE BOOL "" FORCE)
+set(OPENXR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(
+    openxr
+    URL https://github.com/KhronosGroup/OpenXR-SDK/archive/refs/tags/release-1.1.41.zip
+)
+FetchContent_MakeAvailable(openxr)
+message(STATUS "DEBUG: openxr_SOURCE_DIR = ${openxr_SOURCE_DIR}")
+
+# -----------------------------------------------------------------------------
 # Engine Library (Core)
 # -----------------------------------------------------------------------------
 # CMake GLOB_RECURSE should pick up the new files automatically if we just touch this file or re-configure.
@@ -103,22 +123,25 @@ file(GLOB_RECURSE ENGINE_SOURCES
     "src/Engine/*.cpp"
     "src/Engine/*.h"
     # AudioEngine is now included via GLOB_RECURSE
-    "src/GameRegistry.cpp"
     "src/Engine/Core/UUID.cpp"
 )
+list(REMOVE_ITEM ENGINE_SOURCES "${CMAKE_SOURCE_DIR}/src/Engine/Scripting/GameModuleRuntime.cpp")
 
-add_library(EngineLib STATIC ${ENGINE_SOURCES})
-target_include_directories(EngineLib PUBLIC 
+add_library(EngineLib SHARED ${ENGINE_SOURCES})
+target_compile_definitions(EngineLib PRIVATE ENGINELIB_BUILD)
+set_target_properties(EngineLib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF)
+target_include_directories(EngineLib PUBLIC
     include
     ${SDL2_SOURCE_DIR}/include
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
-    ${imguizmo_SOURCE_DIR}
+    ${imguizmo_SOURCE_DIR}/src
     ${bullet_SOURCE_DIR}/src
     ${tinyobjloader_SOURCE_DIR}
     ${CMAKE_BINARY_DIR}/_deps/glew-src/include
+    ${openxr_SOURCE_DIR}/include
 )
-target_compile_definitions(EngineLib PUBLIC GLEW_STATIC)
+target_compile_definitions(EngineLib PUBLIC GLEW_STATIC GLM_ENABLE_EXPERIMENTAL)
 # find_package(GLEW REQUIRED)
 FetchContent_Declare(
     glew
@@ -128,7 +151,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glew)
 message(STATUS "DEBUG: glew_SOURCE_DIR = ${glew_SOURCE_DIR}")
-target_link_libraries(EngineLib PUBLIC SDL2::SDL2main SDL2::SDL2 opengl32 glm::glm glew_s BulletDynamics BulletCollision LinearMath yaml-cpp)
+target_link_libraries(EngineLib PUBLIC SDL2::SDL2main SDL2::SDL2 opengl32 glm::glm glew_s BulletDynamics BulletCollision LinearMath yaml-cpp openxr_loader)
 
 # ImGui needs backend implementation files
 target_sources(EngineLib PRIVATE 
@@ -139,25 +162,28 @@ target_sources(EngineLib PRIVATE
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-    ${imguizmo_SOURCE_DIR}/ImGuizmo.cpp
+    ${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp
 )
 
 # -----------------------------------------------------------------------------
 # Engine Runtime Library (No Editor)
 # -----------------------------------------------------------------------------
-add_library(EngineRuntime STATIC ${ENGINE_SOURCES})
-target_compile_definitions(EngineRuntime PUBLIC GAME_MODE_RUNTIME GLEW_STATIC)
-target_include_directories(EngineRuntime PUBLIC 
+add_library(EngineRuntime SHARED ${ENGINE_SOURCES})
+target_compile_definitions(EngineRuntime PRIVATE ENGINELIB_BUILD)
+set_target_properties(EngineRuntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF)
+target_compile_definitions(EngineRuntime PUBLIC GAME_MODE_RUNTIME GLEW_STATIC GLM_ENABLE_EXPERIMENTAL)
+target_include_directories(EngineRuntime PUBLIC
     include
     ${SDL2_SOURCE_DIR}/include
     ${imgui_SOURCE_DIR}
     ${imgui_SOURCE_DIR}/backends
-    ${imguizmo_SOURCE_DIR}
+    ${imguizmo_SOURCE_DIR}/src
     ${bullet_SOURCE_DIR}/src
     ${tinyobjloader_SOURCE_DIR}
     ${CMAKE_BINARY_DIR}/_deps/glew-src/include
+    ${openxr_SOURCE_DIR}/include
 )
-target_link_libraries(EngineRuntime PUBLIC SDL2::SDL2main SDL2::SDL2 opengl32 glm::glm glew_s BulletDynamics BulletCollision LinearMath yaml-cpp)
+target_link_libraries(EngineRuntime PUBLIC SDL2::SDL2main SDL2::SDL2 opengl32 glm::glm glew_s BulletDynamics BulletCollision LinearMath yaml-cpp openxr_loader)
 # Runtime also needs ImGui sources if we use ImGui in Application (even if hidden or stripped logic still references types)
 # Our conditional code in Application.cpp REMOVES ImGui calls via #ifndef GAME_MODE_RUNTIME
 # But if Application.h includes ImGui headers... checking Application.h...
@@ -183,7 +209,7 @@ target_sources(EngineRuntime PRIVATE
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
     ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-    ${imguizmo_SOURCE_DIR}/ImGuizmo.cpp
+    ${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp
 )
 
 # -----------------------------------------------------------------------------
@@ -192,6 +218,21 @@ target_sources(EngineRuntime PRIVATE
 add_executable(Engine src/main.cpp)
 target_link_libraries(Engine PRIVATE EngineLib)
 
+# Write the build info header via a 2-pass configure so both @VAR@ and $<TARGET_FILE:...>
+# generator expressions resolve correctly.
+configure_file(
+    ${CMAKE_SOURCE_DIR}/src/Engine/Core/EngineBuildInfo.h.in
+    ${CMAKE_BINARY_DIR}/generated/EngineBuildInfo.prelim.h
+    @ONLY)
+
+file(GENERATE
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/$<CONFIG>/Engine/Core/EngineBuildInfo.h
+    INPUT  ${CMAKE_BINARY_DIR}/generated/EngineBuildInfo.prelim.h)
+
+target_include_directories(Engine PRIVATE ${CMAKE_BINARY_DIR}/generated/$<CONFIG>)
+target_include_directories(EngineLib PRIVATE ${CMAKE_BINARY_DIR}/generated/$<CONFIG>)
+target_include_directories(EngineRuntime PRIVATE ${CMAKE_BINARY_DIR}/generated/$<CONFIG>)
+
 # -----------------------------------------------------------------------------
 # Dictionary (Runtime)
 # -----------------------------------------------------------------------------
@@ -199,16 +240,32 @@ add_executable(GameRuntime src/main.cpp)
 target_link_libraries(GameRuntime PRIVATE EngineRuntime)
 # target_compile_definitions(GameRuntime PRIVATE GAME_MODE_RUNTIME) # Already defined in EngineRuntime PUBLIC
 
-# Copy SDL2.dll to output directory on Windows
+# Copy SDL2.dll and EngineLib.dll to output directory on Windows
 if(WIN32)
     add_custom_command(TARGET Engine POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:SDL2::SDL2>
         $<TARGET_FILE_DIR:Engine>
     )
+    add_custom_command(TARGET Engine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:EngineLib>
+        $<TARGET_FILE_DIR:Engine>
+    )
+    # Editor icons — ContentBrowserPanel loads "resources/editor/textures/*" relative to CWD.
+    add_custom_command(TARGET Engine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/resources
+        $<TARGET_FILE_DIR:Engine>/resources
+    )
     add_custom_command(TARGET GameRuntime POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:SDL2::SDL2>
+        $<TARGET_FILE_DIR:GameRuntime>
+    )
+    add_custom_command(TARGET GameRuntime POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:EngineRuntime>
         $<TARGET_FILE_DIR:GameRuntime>
     )
     # Copy Assets folder to Runtime directory
@@ -218,4 +275,17 @@ if(WIN32)
         $<TARGET_FILE_DIR:GameRuntime>/assets
     )
 endif()
+
+# -----------------------------------------------------------------------------
+# GoogleTest (tests)
+# -----------------------------------------------------------------------------
+enable_testing()
+FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+)
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+add_subdirectory(tests)
 

@@ -5,7 +5,6 @@
 #include <cmath>
 #include <glm/glm.hpp>
 
-
 namespace Engine {
 
 class FloatingItem : public ScriptableEntity {

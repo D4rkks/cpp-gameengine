@@ -7,7 +7,7 @@
 
 namespace Engine {
 
-std::string FileDialogs::OpenFile(const char *filter) {
+std::string FileDialogs::OpenFile(const char *filter, const char *initialDir) {
   OPENFILENAMEA ofn;
   CHAR szFile[260] = {0};
   ZeroMemory(&ofn, sizeof(OPENFILENAME));
@@ -27,6 +27,7 @@ std::string FileDialogs::OpenFile(const char *filter) {
   ofn.nMaxFile = sizeof(szFile);
   ofn.lpstrFilter = filter;
   ofn.nFilterIndex = 1;
+  ofn.lpstrInitialDir = initialDir;
   ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
 
   if (GetOpenFileNameA(&ofn) == TRUE) {
@@ -35,7 +36,7 @@ std::string FileDialogs::OpenFile(const char *filter) {
   return std::string();
 }
 
-std::string FileDialogs::SaveFile(const char *filter) {
+std::string FileDialogs::SaveFile(const char *filter, const char *initialDir) {
   OPENFILENAMEA ofn;
   CHAR szFile[260] = {0};
   ZeroMemory(&ofn, sizeof(OPENFILENAME));
@@ -55,6 +56,7 @@ std::string FileDialogs::SaveFile(const char *filter) {
   ofn.nMaxFile = sizeof(szFile);
   ofn.lpstrFilter = filter;
   ofn.nFilterIndex = 1;
+  ofn.lpstrInitialDir = initialDir;
   ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
 
   ofn.lpstrDefExt = strchr(filter, '\0') + 1;

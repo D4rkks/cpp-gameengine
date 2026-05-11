@@ -48,7 +48,7 @@ private:
   void PlayButton() {
     float windowWidth = ImGui::GetWindowSize().x;
     if (ImGui::Button("PLAY", ImVec2(windowWidth - 20, 50))) {
-      //not good
+
       std::cout << "[MainMenu] Play Pressed!" << std::endl;
     }
   }

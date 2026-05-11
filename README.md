@@ -1,90 +1,147 @@
-# C++ Game Engine
+# MyEngine
 
-A custom engine made based in Unity, but using C++
-<img width="1912" height="1029" alt="Screenshot_1" src="https://github.com/user-attachments/assets/2ef60a42-f32e-4de1-b004-42864845ea32" />
+A C++20 game engine with a Unity-style editor, real-time 3D rendering, physics, audio, and native **OpenXR VR** support.
+
+<img width="1912" height="1029" alt="Editor screenshot" src="https://github.com/user-attachments/assets/2ef60a42-f32e-4de1-b004-42864845ea32" />
+
+---
 
 ## Features
 
-- **Entity Component System (ECS):** Management of game objects
-- **Rendering:**
-  - 2D and 3D rendering.
-  - Support for Shaders, Textures, and Framebuffers.
-  - Orthographic and Perspective Cameras.
-- **Physics Engine:** Integrated **Bullet Physics** for 3D collision and rigid body dynamics.
-- **Audio System:** Support for sound effects and background music.
-- **Visual Editor:**
-  - **Scene Hierarchy Panel:** Manage entities and their parent-child relations.
-  - **Properties Panel (Inspector):** Real-time editing of component values.
-  - **Content Browser:** Navigate and manage project assets.
-  - **Gizmos:** Visual manipulation tools (Translate, Rotate, Scale).
-- **Scripting:** Native C++ scripting support (e.g., `FollowPlayer`, `MainMenu`).
-- **Serialization:** Save and load full scenes using YAML format (need fix).
-- **UI System:** Built-in support for debugging.
+### Core
+- Entity-component scene graph with parent/child relationships and UUIDs
+- YAML scene serialization (`.scene` files) and project files (`.myproject`)
+- Hot-reloadable native C++ scripts via DLL (`GameModule`)
+- Built-in `Editor` and `GameRuntime` build targets — the runtime is a standalone executable with no editor code
 
-## Tech Stack & Methods
+### Rendering
+- Deferred-style OpenGL 4.6 pipeline (GLEW + SDL2)
+- PBR materials (metallic / roughness / AO), normal mapping
+- Shadow-mapped directional, point, spot, and area lights
+- Post-process stack: bloom, SSAO, SSR, volumetric fog, god rays, lens flare, DoF, motion blur, TAA, chromatic aberration, film grain, color grading, auto-exposure
+- Mesh LODs, planar reflections, Gerstner-wave water with reflection/refraction
+- Particle systems, skeletal animation, 2D sprites + text rendering
+- Editor grid, ImGuizmo gizmos for translate/rotate/scale
 
-The engine is built using:
+### Physics & Audio
+- Bullet Physics 3 for rigid bodies, box/sphere/capsule/mesh colliders
+- Built-in audio engine with 3D spatialization
 
-- **Language:** C++17/C++20
-- **Windowing & Input:** SDL2
-- **Graphics API:** OpenGL (via GLEW)
-- **Math:** GLM (OpenGL Mathematics)
-- **GUI:** Dear ImGui
-- **Physics:** Bullet Physics 3
-- **Serialization:** yaml-cpp
+### Editor
+- Dockable ImGui panels: Scene Hierarchy, Inspector, Content Browser, Rendering, Viewport
+- Marquee selection, multi-select transforms, undo/redo history
+- Per-project recent-scene list, autosave, in-editor play mode
+- Standalone game build (copies `GameRuntime.exe` + assets + `Game.dll`)
 
-## Requirements
+### VR (OpenXR)
+- Stereoscopic per-eye rendering bound to an `XrSwapchain`
+- Action-based input: grip/aim pose, trigger, squeeze, thumbstick, A/B/X/Y buttons (Touch + Index profiles)
+- `VRRigComponent` for declarative rig setup in the Inspector
+- `VRRigSystem` drives HMD position, smooth/snap locomotion, and child-entity hand poses
+- Preview Mode: simulate the HMD with mouse + WASD when no headset is attached
+- Graceful fallback to flat desktop rendering if no OpenXR runtime is registered
 
-Before building the engine, ensure you have the following installed in your system:
+---
 
-- **Compiler:** Visual Studio 2022 (with "Desktop development with C++")
-- **CMake:** Version 3.20 or higher (usually included with Visual Studio)
+## Tech Stack
 
-## How to Build and Run
+| | |
+|--|--|
+| Language | C++20 |
+| Windowing / Input | SDL2 |
+| Graphics | OpenGL 4.6 (GLEW) |
+| Math | GLM |
+| GUI | Dear ImGui (docking) + ImGuizmo |
+| Physics | Bullet Physics 3 |
+| Serialization | yaml-cpp |
+| VR | OpenXR SDK 1.1.41 |
+| Mesh loading | tinyobjloader, cgltf |
+| Tests | GoogleTest |
 
-### 1. Clone the Repository
-```bash
-git clone <repository-url>
-cd engine
-```
+All dependencies are fetched and built automatically via CMake `FetchContent`.
 
-### 2. Configure the Build
-Uses CMake to fetch dependencies (SDL2, GLM, Bullet, etc.) automatically.
+---
+
+## Build
+
+### Requirements
+- Visual Studio 2022 (Desktop development with C++)
+- CMake 3.20+
+- Windows 10/11
+
+### Configure & build
 ```bash
 cmake -S . -B build
-```
-*Note: This step may take a few minutes as it downloads and compiles dependencies.*
-
-### 3. Compile the Engine
-```bash
 cmake --build build --config Release
 ```
 
-### 4. Run existing Applications
-After the build, the executables will be located in `build/bin/Release/`.
+The first configure takes a few minutes — it downloads SDL2, Bullet, ImGui, GLEW, OpenXR, yaml-cpp, GoogleTest, and others.
 
-- **To run the Editor:**
-  ```bash
-  ./build/bin/Release/Engine.exe
-  ```
-- **To run the Game Runtime:**
-  ```bash
-  ./build/bin/Release/GameRuntime.exe
-  ```
-
-## Controls (Editor)
-
-- **Right Click + WASD:** Move Camera
-- **Q, W, E, R:** Select Gizmo Operation (None, Translate, Rotate, Scale)
-- **Ctrl + S:** Save Scene
-- **Ctrl + O:** Open Scene
-- **Ctrl + Z / Ctrl + Y:** Undo/Redo
-
-## Project Structure
-
-- `src/Engine`: Core engine source code (Renderer, ECS, Physics, etc.)
-- `src/Scripts`: Gameplay scripts.
-- `assets/`: Game assets (Images, Shaders, Scenes).
+### Run
+```bash
+./build/bin/Release/Engine.exe        # editor
+./build/bin/Release/GameRuntime.exe   # standalone runtime
+```
 
 ---
-*Built with C++*
+
+## Editor controls
+
+| Key | Action |
+|--|--|
+| Right click + WASD | Fly camera |
+| Q / W / E / R | Gizmo: None / Translate / Rotate / Scale |
+| Ctrl+S | Save scene |
+| Ctrl+O | Open scene |
+| Ctrl+Z / Ctrl+Y | Undo / Redo |
+| Esc (in Play mode) | Exit play mode |
+
+---
+
+## VR usage
+
+1. Install an OpenXR runtime (Meta Quest Link, SteamVR, or WMR) and set it as **default** in its settings.
+2. Open or create a project and load `assets/VR_Demo.scene` for a starter scene.
+3. The scene includes a `Player` entity with `VRRigComponent`. Open **Rendering → VR (OpenXR)** to verify *Headset ACTIVE*.
+4. Press **Play**. The scene renders stereoscopically; locomotion comes from the left thumbstick, snap turn from the right.
+
+### Without a headset (Preview Mode)
+On the `VRRigComponent`, toggle **Preview Mode**. In Play mode, right-click + WASD simulates the HMD; E/Q raise/lower the head.
+
+### Authoring a VR rig from scratch
+1. Create an entity → **Add Component → VR Rig**.
+2. Optionally add child entities named `LeftHand` and `RightHand` with mesh renderers — `VRRigSystem` will drive their transforms from the controller grip poses.
+3. The rig entity needs a `CameraComponent` with `Primary = true` so Preview Mode and non-VR fallback render through it.
+
+---
+
+## Project layout
+
+```
+src/
+  Engine/        # engine library: rendering, ECS, physics, VR, editor panels
+    Animation/   # skeletal animation
+    Audio/       # audio engine
+    Core/        # Application, Input, UUID
+    Editor/      # ImGui editor panels
+    Project/     # project / asset / script-build management
+    Renderer/    # OpenGL backend, materials, shaders, meshes
+    Scene/       # ECS scene graph, serialization
+    Scripting/   # native script binding + hot-reload
+    Utils/       # platform helpers
+    VR/          # OpenXR session, swapchains, action system, VRRigSystem
+    Window/      # SDL2 window + GL context
+    Scripts/     # built-in ScriptableEntity examples
+  Scripts/       # gameplay scripts
+  main.cpp       # editor + runtime entry point
+assets/          # game assets (scenes, scripts, fonts)
+resources/       # editor icons
+cmake/           # build patches (ImGuizmo signature fix)
+tests/           # GoogleTest unit tests
+```
+
+---
+
+## License
+
+MIT — see `LICENSE`.

@@ -57,6 +57,12 @@ void Shader::UploadUniformMat4(const std::string &name,
   glUniformMatrix4fv(location, 1, GL_FALSE, &matrix[0][0]);
 }
 
+void Shader::UploadUniformMat3(const std::string &name,
+                               const glm::mat3 &matrix) {
+  GLint location = glGetUniformLocation(m_RendererID, name.c_str());
+  glUniformMatrix3fv(location, 1, GL_FALSE, &matrix[0][0]);
+}
+
 void Shader::UploadUniformFloat4(const std::string &name,
                                  const glm::vec4 &values) {
   GLint location = glGetUniformLocation(m_RendererID, name.c_str());

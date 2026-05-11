@@ -1,24 +1,29 @@
 #include "ContentBrowserPanel.h"
 #include <imgui.h>
 #include <iostream>
+#include <cstdio>
 
 namespace Engine {
 
-// Change this to your assets directory
 extern const std::filesystem::path g_AssetPath = "assets";
 
 ContentBrowserPanel::ContentBrowserPanel() : m_CurrentDirectory(g_AssetPath) {
-  m_DirectoryIcon =
-      std::make_shared<Texture2D>("resources/editor/textures/folder.png");
-  m_FileIcon =
-      std::make_shared<Texture2D>("resources/editor/textures/file.png");
-  m_SceneIcon =
-      std::make_shared<Texture2D>("resources/editor/textures/scene.png");
-  m_ModelIcon =
-      std::make_shared<Texture2D>("resources/editor/textures/model.png");
+
+}
+
+static void EnsureContentBrowserIcons(std::shared_ptr<Texture2D>& dir,
+                                      std::shared_ptr<Texture2D>& file,
+                                      std::shared_ptr<Texture2D>& scene,
+                                      std::shared_ptr<Texture2D>& model) {
+  if (dir) return;
+  dir   = std::make_shared<Texture2D>("resources/editor/textures/folder.png");
+  file  = std::make_shared<Texture2D>("resources/editor/textures/file.png");
+  scene = std::make_shared<Texture2D>("resources/editor/textures/scene.png");
+  model = std::make_shared<Texture2D>("resources/editor/textures/model.png");
 }
 
 void ContentBrowserPanel::OnImGuiRender() {
+  EnsureContentBrowserIcons(m_DirectoryIcon, m_FileIcon, m_SceneIcon, m_ModelIcon);
   ImGui::Begin("Content Browser");
 
   if (!std::filesystem::exists(m_CurrentDirectory)) {
@@ -50,7 +55,6 @@ void ContentBrowserPanel::OnImGuiRender() {
 
     ImGui::PushID(filenameString.c_str());
 
-    // Determine Icon
     std::shared_ptr<Texture2D> icon = m_FileIcon;
     ImVec4 tintColor = {1, 1, 1, 1};
 
@@ -71,9 +75,8 @@ void ContentBrowserPanel::OnImGuiRender() {
       }
     }
 
-    // Icon Button
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
-    // ImGui::ImageButton(const char* str_id, ImTextureID user_texture_id, ...)
+
     ImGui::ImageButton("##button", (void *)(intptr_t)icon->GetID(),
                        {thumbnailSize, thumbnailSize}, {0, 1}, {1, 0},
                        {0, 0, 0, 0}, tintColor);

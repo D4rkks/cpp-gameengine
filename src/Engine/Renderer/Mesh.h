@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../Animation/Skeleton.h"
 #include <glm/glm.hpp>
 #include <memory>
 #include <string>
@@ -12,6 +13,11 @@ struct MeshVertex {
   glm::vec3 Position;
   glm::vec3 Normal;
   glm::vec2 TexCoord;
+};
+
+struct MeshSkinningVertex {
+  glm::vec4 BoneIDs{0.0f};
+  glm::vec4 BoneWeights{0.0f};
 };
 
 class Mesh {
@@ -32,12 +38,18 @@ public:
   const glm::vec3 &GetAABBMin() const { return m_AABBMin; }
   const glm::vec3 &GetAABBMax() const { return m_AABBMax; }
 
+  const std::vector<MeshVertex> &GetVertices() const { return m_Vertices; }
+  const std::vector<uint32_t>   &GetIndices()  const { return m_Indices; }
+
 private:
   std::string m_FilePath;
   bool m_IsLoaded = false;
   glm::vec3 m_LocalDimensions = {1.0f, 1.0f, 1.0f};
   glm::vec3 m_AABBMin = {0.0f, 0.0f, 0.0f};
   glm::vec3 m_AABBMax = {0.0f, 0.0f, 0.0f};
+
+  std::vector<MeshVertex> m_Vertices;
+  std::vector<uint32_t>   m_Indices;
 
   std::shared_ptr<VertexArray> m_VertexArray;
   std::shared_ptr<VertexBuffer> m_VertexBuffer;

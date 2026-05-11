@@ -1,12 +1,13 @@
 #pragma once
 
+#include "../Core/EngineAPI.h"
 #include "Components.h"
 #include <glm/glm.hpp>
 #include <string>
 
 namespace Engine {
 
-class Entity {
+class ENGINE_API Entity {
 public:
   Entity() = default;
   Entity(int id, const std::string &name = "Entity") : m_ID(id), Name(name) {}
@@ -17,6 +18,11 @@ public:
   SpriteRendererComponent SpriteRenderer;
   RigidBodyComponent RigidBody;
   BoxColliderComponent BoxCollider;
+  SphereColliderComponent SphereCollider;
+  CapsuleColliderComponent CapsuleCollider;
+  MeshColliderComponent MeshCollider;
+  WaterComponent Water;
+  ParticleSystemComponent ParticleSystem;
   CameraComponent Camera;
   LightComponent Light;
   SkyboxComponent Skybox;
@@ -25,22 +31,28 @@ public:
   IDComponent UUID;
   RelationshipComponent Relationship;
 
-
   CanvasComponent Canvas;
-  RectTransformComponent RectTransform; 
+  RectTransformComponent RectTransform;
   ImageComponent Image;
   ButtonComponent Button;
   TextComponent Text;
   AudioSourceComponent AudioSource;
+  VRRigComponent VRRig;
 
   bool HasSkybox = false;
   bool HasMeshRenderer = false;
   bool HasRigidBody = false;
   bool HasBoxCollider = false;
+  bool HasSphereCollider = false;
+  bool HasCapsuleCollider = false;
+  bool HasMeshCollider = false;
+  bool HasWater = false;
+  bool HasParticleSystem = false;
   bool HasCamera = false;
   bool HasSpriteRenderer = true;
   bool HasLight = false;
   bool HasAudioSource = false;
+  bool HasVRRig = false;
 
   bool HasRelationship = false;
   bool HasCanvas = false;

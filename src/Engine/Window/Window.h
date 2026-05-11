@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../Core/EngineAPI.h"
 #include <SDL.h>
 #include <string>
 
@@ -15,7 +16,7 @@ struct WindowProps {
       : Title(title), Width(width), Height(height) {}
 };
 
-class Window {
+class ENGINE_API Window {
 public:
   Window(const WindowProps &props = WindowProps());
   ~Window();

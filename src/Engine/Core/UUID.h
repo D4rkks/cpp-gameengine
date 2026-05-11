@@ -1,11 +1,12 @@
 #pragma once
 
+#include "EngineAPI.h"
 #include <functional>
 #include <random>
 
 namespace Engine {
 
-class UUID {
+class ENGINE_API UUID {
 public:
   UUID();
   UUID(uint64_t uuid);

@@ -55,9 +55,6 @@ public:
       std::cout << "Quit Pressed!" << std::endl;
     }
 
-    // ImGui::Image((void*)(intptr_t)textureID,
-    // ImVec2(100, 100));
-
     ImGui::End();
   }
 
@@ -66,4 +63,4 @@ private:
   bool m_KeyProcessed = false;
 };
 
-} // namespace Engine
+}

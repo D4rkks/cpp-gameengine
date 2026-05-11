@@ -32,6 +32,7 @@ public:
   }
 
   void AddSelectedEntity(int id) { m_SelectedEntities.insert(id); }
+  void RemoveSelectedEntity(int id) { m_SelectedEntities.erase(id); }
   void ClearSelection() { m_SelectedEntities.clear(); }
   bool IsSelected(int id) const {
     return m_SelectedEntities.find(id) != m_SelectedEntities.end();

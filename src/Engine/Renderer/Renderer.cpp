@@ -1,13 +1,14 @@
 #include "Renderer.h"
 #include "Mesh.h"
+#include "RenderState.h"
 #include <GL/glew.h>
 
 namespace Engine {
 
 void Renderer::Init() {
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glEnable(GL_DEPTH_TEST);
+  RenderState::SetBlend(true);
+  RenderState::SetDefaultBlendFunc();
+  RenderState::SetDepthTest(true);
 }
 
 void Renderer::Shutdown() {}
@@ -18,16 +19,6 @@ void Renderer::SetClearColor(const glm::vec4 &color) {
 
 void Renderer::Clear() { glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT); }
 
-// void Renderer::Submit(const std::shared_ptr<Shader> &shader,
-//                       const std::shared_ptr<VertexArray> &vertexArray,
-//                       const glm::mat4 &transform) {
-//   shader->Bind();
-//   shader->UploadUniformMat4("u_ViewProjection",
-//   s_SceneData->ViewProjectionMatrix);
-//   shader->UploadUniformMat4("u_Transform", transform);
-//   vertexArray->Bind();
-//   RenderCommand::DrawIndexed(vertexArray);
-// }
 static unsigned int s_LineShader = 0;
 static unsigned int s_LineVAO = 0, s_LineVBO = 0;
 

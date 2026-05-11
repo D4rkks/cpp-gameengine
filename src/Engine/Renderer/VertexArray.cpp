@@ -31,7 +31,11 @@ void VertexArray::AddVertexBuffer(
   vertexBuffer->Bind();
 
   const auto &layout = vertexBuffer->GetLayout();
+
   unsigned int index = 0;
+  for (auto &existing : m_VertexBuffers) {
+    index += (unsigned int)existing->GetLayout().GetElements().size();
+  }
   for (const auto &element : layout) {
     glEnableVertexAttribArray(index);
     glVertexAttribPointer(index,

@@ -128,7 +128,6 @@ void Renderer2D::DrawString(const std::string &text,
     float ipw = 1.0f / 1024.0f;
     float iph = 1.0f / 1024.0f;
 
-
     float b_w = (glyph->x1 - glyph->x0) * scale;
     float b_h = (glyph->y1 - glyph->y0) * scale;
     float b_xoff = glyph->xoff * scale;

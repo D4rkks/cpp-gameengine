@@ -53,7 +53,7 @@ void Window::Init(const WindowProps &props) {
 
   m_Context = SDL_GL_CreateContext(m_Window);
   SDL_GL_MakeCurrent(m_Window, m_Context);
-  SDL_GL_SetSwapInterval(1);// vsync on = 1
+  SDL_GL_SetSwapInterval(1);
 
   glewExperimental = GL_TRUE;
   GLenum err = glewInit();
@@ -66,7 +66,7 @@ void Window::Init(const WindowProps &props) {
   std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
   std::cout << "OpenGL Renderer: " << glGetString(GL_RENDERER) << std::endl;
 
-  std::cout << "OpenGL Renderer: " << glGetString(GL_RENDERER) << std::endl;
+  glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
 
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
@@ -76,7 +76,7 @@ void Window::Init(const WindowProps &props) {
   io.ConfigFlags |=
       ImGuiConfigFlags_NavEnableKeyboard;
   io.ConfigFlags |=
-      ImGuiConfigFlags_NavEnableGamepad;          
+      ImGuiConfigFlags_NavEnableGamepad;
   io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
   if (std::filesystem::exists("resources/editor/fonts/Roboto-Medium.ttf")) {
@@ -87,39 +87,83 @@ void Window::Init(const WindowProps &props) {
   auto &style = ImGui::GetStyle();
   auto &colors = style.Colors;
 
-  style.WindowRounding = 2.0f;
-  style.FrameRounding = 2.0f;
-  style.GrabRounding = 2.0f;
-  style.PopupRounding = 2.0f;
-  style.TabRounding = 2.0f;
+  style.WindowRounding    = 4.0f;
+  style.ChildRounding     = 4.0f;
+  style.FrameRounding     = 4.0f;
+  style.GrabRounding      = 4.0f;
+  style.PopupRounding     = 4.0f;
+  style.TabRounding       = 4.0f;
+  style.ScrollbarRounding = 4.0f;
+  style.WindowBorderSize  = 0.0f;
+  style.ChildBorderSize   = 0.0f;
+  style.PopupBorderSize   = 1.0f;
+  style.FrameBorderSize   = 0.0f;
+  style.WindowPadding     = ImVec2(10, 10);
+  style.FramePadding      = ImVec2(8, 4);
+  style.ItemSpacing       = ImVec2(8, 6);
+  style.ItemInnerSpacing  = ImVec2(6, 4);
+  style.IndentSpacing     = 18.0f;
+  style.ScrollbarSize     = 12.0f;
 
-  colors[ImGuiCol_WindowBg] = ImVec4{0.1f, 0.105f, 0.11f, 1.0f};
+  const ImVec4 bg        {0.09f, 0.10f, 0.12f, 1.0f};
+  const ImVec4 panel     {0.12f, 0.13f, 0.16f, 1.0f};
+  const ImVec4 panelHi   {0.16f, 0.18f, 0.22f, 1.0f};
+  const ImVec4 accent    {0.25f, 0.55f, 0.95f, 1.0f};
+  const ImVec4 accentHi  {0.35f, 0.65f, 1.00f, 1.0f};
+  const ImVec4 text      {0.90f, 0.92f, 0.95f, 1.0f};
+  const ImVec4 textDim   {0.50f, 0.55f, 0.62f, 1.0f};
 
-  colors[ImGuiCol_Header] = ImVec4{0.2f, 0.205f, 0.21f, 1.0f};
-  colors[ImGuiCol_HeaderHovered] = ImVec4{0.3f, 0.305f, 0.31f, 1.0f};
-  colors[ImGuiCol_HeaderActive] = ImVec4{0.15f, 0.1505f, 0.151f, 1.0f};
-  colors[ImGuiCol_Button] = ImVec4{0.2f, 0.205f, 0.21f, 1.0f};
-  colors[ImGuiCol_ButtonHovered] = ImVec4{0.3f, 0.305f, 0.31f, 1.0f};
-  colors[ImGuiCol_ButtonActive] = ImVec4{0.15f, 0.1505f, 0.151f, 1.0f};
+  colors[ImGuiCol_WindowBg]            = bg;
+  colors[ImGuiCol_ChildBg]             = bg;
+  colors[ImGuiCol_PopupBg]             = panel;
+  colors[ImGuiCol_Border]              = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
 
-  colors[ImGuiCol_FrameBg] = ImVec4{0.16f, 0.1605f, 0.161f, 1.0f};
-  colors[ImGuiCol_FrameBgHovered] = ImVec4{0.2f, 0.205f, 0.21f, 1.0f};
-  colors[ImGuiCol_FrameBgActive] = ImVec4{0.15f, 0.1505f, 0.151f, 1.0f};
+  colors[ImGuiCol_Text]                = text;
+  colors[ImGuiCol_TextDisabled]        = textDim;
 
-  colors[ImGuiCol_Tab] = ImVec4{0.15f, 0.1505f, 0.151f, 1.0f};
-  colors[ImGuiCol_TabHovered] = ImVec4{0.38f, 0.3805f, 0.381f, 1.0f};
-  colors[ImGuiCol_TabActive] = ImVec4{0.28f, 0.2805f, 0.281f, 1.0f};
-  colors[ImGuiCol_TabUnfocused] = ImVec4{0.15f, 0.1505f, 0.151f, 1.0f};
-  colors[ImGuiCol_TabUnfocusedActive] = ImVec4{0.2f, 0.205f, 0.21f, 1.0f};
-  colors[ImGuiCol_Tab] = ImVec4{0.15f, 0.1505f, 0.151f, 1.0f};
-  colors[ImGuiCol_TabHovered] = ImVec4{0.38f, 0.3805f, 0.381f, 1.0f};
-  colors[ImGuiCol_TabActive] = ImVec4{0.28f, 0.2805f, 0.281f, 1.0f};
-  colors[ImGuiCol_TabUnfocused] = ImVec4{0.15f, 0.1505f, 0.151f, 1.0f};
-  colors[ImGuiCol_TabUnfocusedActive] = ImVec4{0.2f, 0.205f, 0.21f, 1.0f};
+  colors[ImGuiCol_FrameBg]             = panel;
+  colors[ImGuiCol_FrameBgHovered]      = panelHi;
+  colors[ImGuiCol_FrameBgActive]       = ImVec4(0.20f, 0.30f, 0.45f, 1.0f);
 
-  colors[ImGuiCol_TitleBg] = ImVec4{0.15f, 0.1505f, 0.151f, 1.0f};
-  colors[ImGuiCol_TitleBgActive] = ImVec4{0.15f, 0.1505f, 0.151f, 1.0f};
-  colors[ImGuiCol_TitleBgCollapsed] = ImVec4{0.15f, 0.1505f, 0.151f, 1.0f};
+  colors[ImGuiCol_TitleBg]             = ImVec4(0.06f, 0.07f, 0.09f, 1.0f);
+  colors[ImGuiCol_TitleBgActive]       = ImVec4(0.08f, 0.10f, 0.14f, 1.0f);
+  colors[ImGuiCol_TitleBgCollapsed]    = ImVec4(0.06f, 0.07f, 0.09f, 1.0f);
+
+  colors[ImGuiCol_MenuBarBg]           = ImVec4(0.06f, 0.07f, 0.09f, 1.0f);
+
+  colors[ImGuiCol_ScrollbarBg]         = ImVec4(0.05f, 0.06f, 0.08f, 1.0f);
+  colors[ImGuiCol_ScrollbarGrab]       = panelHi;
+  colors[ImGuiCol_ScrollbarGrabHovered]= ImVec4(0.22f, 0.26f, 0.32f, 1.0f);
+  colors[ImGuiCol_ScrollbarGrabActive] = accent;
+
+  colors[ImGuiCol_CheckMark]           = accent;
+  colors[ImGuiCol_SliderGrab]          = accent;
+  colors[ImGuiCol_SliderGrabActive]    = accentHi;
+
+  colors[ImGuiCol_Button]              = panel;
+  colors[ImGuiCol_ButtonHovered]       = panelHi;
+  colors[ImGuiCol_ButtonActive]        = accent;
+
+  colors[ImGuiCol_Header]              = panel;
+  colors[ImGuiCol_HeaderHovered]       = panelHi;
+  colors[ImGuiCol_HeaderActive]        = ImVec4(0.20f, 0.30f, 0.45f, 1.0f);
+
+  colors[ImGuiCol_Separator]           = ImVec4(0.18f, 0.20f, 0.25f, 1.0f);
+  colors[ImGuiCol_SeparatorHovered]    = accent;
+  colors[ImGuiCol_SeparatorActive]     = accentHi;
+
+  colors[ImGuiCol_ResizeGrip]          = ImVec4(0.18f, 0.22f, 0.28f, 1.0f);
+  colors[ImGuiCol_ResizeGripHovered]   = accent;
+  colors[ImGuiCol_ResizeGripActive]    = accentHi;
+
+  colors[ImGuiCol_Tab]                 = ImVec4(0.08f, 0.09f, 0.11f, 1.0f);
+  colors[ImGuiCol_TabHovered]          = panelHi;
+  colors[ImGuiCol_TabActive]           = panel;
+  colors[ImGuiCol_TabUnfocused]        = ImVec4(0.06f, 0.07f, 0.09f, 1.0f);
+  colors[ImGuiCol_TabUnfocusedActive]  = ImVec4(0.10f, 0.11f, 0.14f, 1.0f);
+
+  colors[ImGuiCol_DockingPreview]      = ImVec4(accent.x, accent.y, accent.z, 0.60f);
+  colors[ImGuiCol_DockingEmptyBg]      = bg;
 
   ImGui_ImplSDL2_InitForOpenGL(m_Window, m_Context);
   ImGui_ImplOpenGL3_Init("#version 130");

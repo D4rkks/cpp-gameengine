@@ -1,25 +1,23 @@
 #include "Engine/Core/Application.h"
 #include <iostream>
+#include <fstream>
 
-// Define entry point
-namespace Engine {
-extern void RegisterGameScripts();
-}
+#ifdef _WIN32
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+#endif
 
 int main(int argc, char *argv[]) {
-  Engine::RegisterGameScripts();
   try {
-    auto app = new Engine::Application();
-
+    auto app = new Engine::Application(argc, argv);
     app->Run();
-
     delete app;
   } catch (const std::exception &e) {
     std::cerr << "FATAL ERROR: " << e.what() << std::endl;
-    std::cout << "Press Enter to continue..." << std::endl;
-    std::cin.get();
+#ifdef _WIN32
+    MessageBoxA(nullptr, e.what(), "Fatal Error", MB_OK | MB_ICONERROR);
+#endif
     return -1;
   }
-
   return 0;
 }

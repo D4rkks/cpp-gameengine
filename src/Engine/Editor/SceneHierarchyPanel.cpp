@@ -1,8 +1,7 @@
 #include "SceneHierarchyPanel.h"
-#include "../../Scripts/FloatingItem.h"
 #include "../Renderer/Texture.h"
-#include "../Scripting/ScriptRegistry.h"
-#include "../Scripts/PlayerController.h"
+#include "../Core/Application.h"
+#include "../Scripting/GameModule.h"
 #include "../Utils/PlatformUtils.h"
 
 #include <algorithm>
@@ -11,8 +10,59 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <string>
+#include <vector>
 
 namespace Engine {
+
+static glm::vec3 ExtractTranslation(const glm::mat4 &matrix) {
+  return glm::vec3(matrix[3]);
+}
+
+static bool SelectionContainsAncestor(Scene &scene, const Entity &entity,
+                                      const std::set<int> &selection) {
+  UUID parentUUID =
+      entity.HasRelationship ? entity.Relationship.Parent : UUID(0);
+  while (parentUUID != 0) {
+    const Entity *parent = scene.GetEntityByUUIDPtr(parentUUID);
+    if (!parent)
+      return false;
+    if (selection.find(parent->GetID()) != selection.end())
+      return true;
+    parentUUID = parent->HasRelationship ? parent->Relationship.Parent
+                                          : UUID(0);
+  }
+  return false;
+}
+
+static Entity CreateGroupedSelection(Scene &scene,
+                                     const std::set<int> &selection) {
+  std::vector<UUID> selectedRoots;
+  glm::vec3 center(0.0f);
+
+  for (int id : selection) {
+    Entity *entity = scene.GetEntityByID(id);
+    if (!entity || SelectionContainsAncestor(scene, *entity, selection))
+      continue;
+
+    selectedRoots.push_back(entity->GetUUID());
+    center += ExtractTranslation(scene.GetWorldTransform(*entity));
+  }
+
+  if (selectedRoots.empty())
+    return Entity();
+
+  center /= static_cast<float>(selectedRoots.size());
+
+  Entity group = scene.CreateEntity("Group");
+  group.HasSpriteRenderer = false;
+  group.Transform.Translation = center;
+  scene.UpdateEntity(group);
+
+  for (UUID childUUID : selectedRoots)
+    scene.SetParent(childUUID, group.GetUUID(), true);
+
+  return scene.GetEntityByUUID(group.GetUUID());
+}
 
 SceneHierarchyPanel::SceneHierarchyPanel(const std::shared_ptr<Scene> &scene) {
   SetContext(scene);
@@ -39,22 +89,6 @@ Entity SceneHierarchyPanel::GetSelectedEntity() const {
 }
 
 void SceneHierarchyPanel::OnImGuiRender() {
-  /*
-  ImGui::Begin("Scene Settings");
-  if (ImGui::CollapsingHeader("Physics", ImGuiTreeNodeFlags_DefaultOpen)) {
-    if (m_Context) { // Ensure m_Context is valid before accessing scene
-                     // properties
-      glm::vec3 gravity = m_Context->GetGravity();
-      if (ImGui::DragFloat3("Gravity", glm::value_ptr(gravity), 0.1f)) {
-        m_Context->SetGravity(gravity);
-      }
-    }
-  }
-  ImGui::End();
-  */
-
-  ImGui::Begin("Debug Control");
-  ImGui::End();
 
   ImGui::SetNextWindowPos(ImVec2(0, 100), ImGuiCond_FirstUseEver);
   ImGui::SetNextWindowSize(ImVec2(250, 500), ImGuiCond_FirstUseEver);
@@ -64,13 +98,11 @@ void SceneHierarchyPanel::OnImGuiRender() {
     int entityToDelete = -1;
     bool anyItemHovered = false;
 
+    m_Context->NormalizeHierarchy();
+
     for (const auto &entity : m_Context->GetEntities()) {
-      if (entity.HasRelationship && entity.Relationship.Parent != 0) {
-        Entity parent = m_Context->GetEntityByUUID(entity.Relationship.Parent);
-        if (parent.GetID() != -1) {
-          continue;
-        }
-      }
+      if (!m_Context->IsRootEntity(entity))
+        continue;
 
       bool deleted = false;
       DrawEntityNode(entity, deleted, anyItemHovered);
@@ -85,7 +117,8 @@ void SceneHierarchyPanel::OnImGuiRender() {
       m_SelectedEntities.erase(entityToDelete);
     }
 
-    if (ImGui::IsMouseDown(0) && ImGui::IsWindowHovered())
+    if (ImGui::IsMouseClicked(0) && ImGui::IsWindowHovered() &&
+        !anyItemHovered && !ImGui::IsAnyItemHovered())
       m_SelectedEntities.clear();
 
     if (!anyItemHovered && ImGui::BeginPopupContextWindow(0, 1)) {
@@ -93,6 +126,12 @@ void SceneHierarchyPanel::OnImGuiRender() {
         if (m_OnHistorySaveCallback)
           m_OnHistorySaveCallback();
         m_Context->CreateEntity("Empty Entity");
+      }
+      if (!m_SelectedEntities.empty() && ImGui::MenuItem("Group Selected")) {
+        if (m_OnHistorySaveCallback)
+          m_OnHistorySaveCallback();
+        Entity group = CreateGroupedSelection(*m_Context, m_SelectedEntities);
+        SetSelectedEntity(group);
       }
       if (ImGui::MenuItem("Create Camera")) {
         if (m_OnHistorySaveCallback)
@@ -105,6 +144,8 @@ void SceneHierarchyPanel::OnImGuiRender() {
       }
       if (ImGui::BeginMenu("UI")) {
         if (ImGui::MenuItem("Canvas")) {
+          if (m_OnHistorySaveCallback)
+            m_OnHistorySaveCallback();
           auto e = m_Context->CreateEntity("UI Canvas");
           e.HasCanvas = true;
           e.Canvas.IsScreenSpace = true;
@@ -114,6 +155,8 @@ void SceneHierarchyPanel::OnImGuiRender() {
           m_Context->UpdateEntity(e);
         }
         if (ImGui::MenuItem("Image")) {
+          if (m_OnHistorySaveCallback)
+            m_OnHistorySaveCallback();
           auto e = m_Context->CreateEntity("UI Image");
           e.HasImage = true;
           e.HasRectTransform = true;
@@ -121,6 +164,8 @@ void SceneHierarchyPanel::OnImGuiRender() {
           m_Context->UpdateEntity(e);
         }
         if (ImGui::MenuItem("Button")) {
+          if (m_OnHistorySaveCallback)
+            m_OnHistorySaveCallback();
           auto e = m_Context->CreateEntity("UI Button");
           e.HasButton = true;
           e.HasImage = true;
@@ -132,6 +177,8 @@ void SceneHierarchyPanel::OnImGuiRender() {
           m_Context->UpdateEntity(e);
         }
         if (ImGui::MenuItem("Text")) {
+          if (m_OnHistorySaveCallback)
+            m_OnHistorySaveCallback();
           auto e = m_Context->CreateEntity("UI Text");
           e.HasText = true;
           e.HasRectTransform = true;
@@ -147,38 +194,15 @@ void SceneHierarchyPanel::OnImGuiRender() {
   }
 
   ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, 30.0f));
-  if (ImGui::BeginDragDropTarget()) {
+  if (m_Context && ImGui::BeginDragDropTarget()) {
     if (const ImGuiPayload *payload =
             ImGui::AcceptDragDropPayload("SCENE_HIERARCHY_ITEM")) {
       int droppedID = *(const int *)payload->Data;
-      Entity droppedEntity;
-      bool found = false;
-      for (auto &e : m_Context->GetEntities()) {
-        if (e.GetID() == droppedID) {
-          droppedEntity = e;
-          found = true;
-          break;
-        }
-      }
-
-      if (found) {
-        if (droppedEntity.HasRelationship &&
-            droppedEntity.Relationship.Parent != 0) {
-          Entity oldParent =
-              m_Context->GetEntityByUUID(droppedEntity.Relationship.Parent);
-          if (oldParent.GetID() != -1) {
-            auto &children = oldParent.Relationship.Children;
-            auto it = std::find(children.begin(), children.end(),
-                                droppedEntity.GetUUID());
-            if (it != children.end()) {
-              children.erase(it);
-              m_Context->UpdateEntity(oldParent);
-            }
-          }
-        }
-        droppedEntity.HasRelationship = true;
-        droppedEntity.Relationship.Parent = 0;
-        m_Context->UpdateEntity(droppedEntity);
+      Entity *droppedEntity = m_Context->GetEntityByID(droppedID);
+      if (droppedEntity) {
+        if (m_OnHistorySaveCallback)
+          m_OnHistorySaveCallback();
+        m_Context->ClearParent(droppedEntity->GetUUID(), true);
       }
     }
     ImGui::EndDragDropTarget();
@@ -213,8 +237,10 @@ void SceneHierarchyPanel::DrawEntityNode(Entity entity, bool &outDeleted,
       (IsSelected(entity.GetID()) ? ImGuiTreeNodeFlags_Selected : 0) |
       ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
 
-  bool hasChildren =
-      entity.HasRelationship && !entity.Relationship.Children.empty();
+  Entity *liveEntity = m_Context ? m_Context->GetEntityByUUIDPtr(entity.GetUUID())
+                                 : nullptr;
+  bool hasChildren = liveEntity && liveEntity->HasRelationship &&
+                     !liveEntity->Relationship.Children.empty();
   if (!hasChildren)
     flags |= ImGuiTreeNodeFlags_Leaf;
 
@@ -249,40 +275,14 @@ void SceneHierarchyPanel::DrawEntityNode(Entity entity, bool &outDeleted,
       int droppedID = *(const int *)payload->Data;
 
       if (droppedID != entity.GetID()) {
-        Entity droppedEntity;
-        bool foundDropped = false;
-        for (auto &e : m_Context->GetEntities()) {
-          if (e.GetID() == droppedID) {
-            droppedEntity = e;
-            foundDropped = true;
-            break;
-          }
-        }
-
-        if (foundDropped) {
-          if (droppedEntity.HasRelationship &&
-              droppedEntity.Relationship.Parent != 0) {
-            Entity oldParent =
-                m_Context->GetEntityByUUID(droppedEntity.Relationship.Parent);
-            if (oldParent.GetID() != -1) {
-              auto &children = oldParent.Relationship.Children;
-              auto it = std::find(children.begin(), children.end(),
-                                  droppedEntity.GetUUID());
-              if (it != children.end()) {
-                children.erase(it);
-                m_Context->UpdateEntity(oldParent);
-              }
-            }
-          }
-
-          droppedEntity.HasRelationship = true;
-          droppedEntity.Relationship.Parent = entity.GetUUID();
-
-          m_Context->UpdateEntity(droppedEntity);
-
-          entity.HasRelationship = true;
-          entity.Relationship.Children.push_back(droppedEntity.GetUUID());
-          m_Context->UpdateEntity(entity);
+        Entity *droppedEntity = m_Context->GetEntityByID(droppedID);
+        if (droppedEntity &&
+            !m_Context->WouldCreateCycle(droppedEntity->GetUUID(),
+                                         entity.GetUUID())) {
+          if (m_OnHistorySaveCallback)
+            m_OnHistorySaveCallback();
+          m_Context->SetParent(droppedEntity->GetUUID(), entity.GetUUID(),
+                               true);
         }
       }
     }
@@ -292,20 +292,6 @@ void SceneHierarchyPanel::DrawEntityNode(Entity entity, bool &outDeleted,
       const char *path = (const char *)payload->Data;
       std::filesystem::path filepath = std::filesystem::path(path);
 
-      if (filepath.extension() == ".h") {
-        std::string filename = filepath.filename().string();
-        if (filename == "FloatingItem.h") {
-          if (!entity.HasScript) {
-            entity.AddScript<FloatingItem>("FloatingItem");
-            m_Context->UpdateEntity(entity);
-          }
-        } else if (filename == "PlayerController.h") {
-          if (!entity.HasScript) {
-            entity.AddScript<PlayerController>("PlayerController");
-            m_Context->UpdateEntity(entity);
-          }
-        }
-      }
     }
     ImGui::EndDragDropTarget();
   }
@@ -314,54 +300,57 @@ void SceneHierarchyPanel::DrawEntityNode(Entity entity, bool &outDeleted,
     if (ImGui::MenuItem("Delete Entity"))
       outDeleted = true;
 
+    if (!m_SelectedEntities.empty() && ImGui::MenuItem("Group Selected")) {
+      if (m_OnHistorySaveCallback)
+        m_OnHistorySaveCallback();
+      Entity group = CreateGroupedSelection(*m_Context, m_SelectedEntities);
+      SetSelectedEntity(group);
+    }
+
+    if (entity.HasRelationship && entity.Relationship.Parent != 0 &&
+        ImGui::MenuItem("Make Root")) {
+      if (m_OnHistorySaveCallback)
+        m_OnHistorySaveCallback();
+      m_Context->ClearParent(entity.GetUUID(), true);
+    }
+
     if (ImGui::BeginMenu("Create Child")) {
       if (ImGui::MenuItem("Empty Entity")) {
+        if (m_OnHistorySaveCallback)
+          m_OnHistorySaveCallback();
         auto child = m_Context->CreateEntity("Child");
-        child.HasRelationship = true;
-        child.Relationship.Parent = entity.GetUUID();
-
-        Entity parent = m_Context->GetEntityByUUID(entity.GetUUID());
-        parent.Relationship.Children.push_back(child.GetUUID());
-        parent.HasRelationship = true;
-        m_Context->UpdateEntity(parent);
+        child.HasSpriteRenderer = false;
         m_Context->UpdateEntity(child);
+        m_Context->SetParent(child.GetUUID(), entity.GetUUID(), false);
       }
 
       if (ImGui::BeginMenu("UI")) {
         if (ImGui::MenuItem("Canvas")) {
+          if (m_OnHistorySaveCallback)
+            m_OnHistorySaveCallback();
           auto child = m_Context->CreateEntity("UI Canvas");
-          child.HasRelationship = true;
-          child.Relationship.Parent = entity.GetUUID();
           child.HasCanvas = true;
           child.Canvas.IsScreenSpace = true;
           child.HasRectTransform = true;
           child.HasSpriteRenderer = false;
           child.RectTransform.SizeDelta = {1280.0f, 720.0f};
-
-          Entity parent = m_Context->GetEntityByUUID(entity.GetUUID());
-          parent.Relationship.Children.push_back(child.GetUUID());
-          parent.HasRelationship = true;
-          m_Context->UpdateEntity(parent);
           m_Context->UpdateEntity(child);
+          m_Context->SetParent(child.GetUUID(), entity.GetUUID(), false);
         }
         if (ImGui::MenuItem("Image")) {
+          if (m_OnHistorySaveCallback)
+            m_OnHistorySaveCallback();
           auto child = m_Context->CreateEntity("UI Image");
-          child.HasRelationship = true;
-          child.Relationship.Parent = entity.GetUUID();
           child.HasImage = true;
           child.HasRectTransform = true;
           child.HasSpriteRenderer = false;
-
-          Entity parent = m_Context->GetEntityByUUID(entity.GetUUID());
-          parent.Relationship.Children.push_back(child.GetUUID());
-          parent.HasRelationship = true;
-          m_Context->UpdateEntity(parent);
           m_Context->UpdateEntity(child);
+          m_Context->SetParent(child.GetUUID(), entity.GetUUID(), false);
         }
         if (ImGui::MenuItem("Button")) {
+          if (m_OnHistorySaveCallback)
+            m_OnHistorySaveCallback();
           auto child = m_Context->CreateEntity("UI Button");
-          child.HasRelationship = true;
-          child.Relationship.Parent = entity.GetUUID();
           child.HasButton = true;
           child.HasImage = true;
           child.HasRectTransform = true;
@@ -370,28 +359,20 @@ void SceneHierarchyPanel::DrawEntityNode(Entity entity, bool &outDeleted,
           child.Text.Color = {0, 0, 0, 1};
           child.HasSpriteRenderer = false;
           child.RectTransform.SizeDelta = {160.0f, 40.0f};
-
-          Entity parent = m_Context->GetEntityByUUID(entity.GetUUID());
-          parent.Relationship.Children.push_back(child.GetUUID());
-          parent.HasRelationship = true;
-          m_Context->UpdateEntity(parent);
           m_Context->UpdateEntity(child);
+          m_Context->SetParent(child.GetUUID(), entity.GetUUID(), false);
         }
         if (ImGui::MenuItem("Text")) {
+          if (m_OnHistorySaveCallback)
+            m_OnHistorySaveCallback();
           auto child = m_Context->CreateEntity("UI Text");
-          child.HasRelationship = true;
-          child.Relationship.Parent = entity.GetUUID();
           child.HasText = true;
           child.HasRectTransform = true;
           child.Text.TextString = "New Text";
           child.HasSpriteRenderer = false;
           child.RectTransform.SizeDelta = {200.0f, 50.0f};
-
-          Entity parent = m_Context->GetEntityByUUID(entity.GetUUID());
-          parent.Relationship.Children.push_back(child.GetUUID());
-          parent.HasRelationship = true;
-          m_Context->UpdateEntity(parent);
           m_Context->UpdateEntity(child);
+          m_Context->SetParent(child.GetUUID(), entity.GetUUID(), false);
         }
         ImGui::EndMenu();
       }
@@ -402,8 +383,11 @@ void SceneHierarchyPanel::DrawEntityNode(Entity entity, bool &outDeleted,
   }
 
   if (opened) {
-    if (entity.HasRelationship) {
-      for (auto childUUID : entity.Relationship.Children) {
+    liveEntity = m_Context ? m_Context->GetEntityByUUIDPtr(entity.GetUUID())
+                           : nullptr;
+    if (liveEntity && liveEntity->HasRelationship) {
+      std::vector<UUID> children = liveEntity->Relationship.Children;
+      for (auto childUUID : children) {
         Entity child = m_Context->GetEntityByUUID(childUUID);
         if (child.GetID() != -1) {
           bool childDeleted = false;
@@ -435,7 +419,7 @@ static void DrawComponent(const std::string &name, Entity *entity,
                         ImVec2{0, 8});
     float lineHeight =
         ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y * 2.0f;
-    ImGui::Spacing(); 
+    ImGui::Spacing();
     ImGui::Separator();
     bool open = ImGui::TreeNodeEx((void *)typeid(T).hash_code(), treeNodeFlags,
                                   name.c_str());
@@ -641,6 +625,56 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
     ImGui::PopStyleVar();
   }
 
+  if (ImGui::CollapsingHeader("Hierarchy", ImGuiTreeNodeFlags_DefaultOpen)) {
+    Entity *liveEntity = m_Context->GetEntityByID(entity->GetID());
+    if (liveEntity) {
+      UUID parentUUID = liveEntity->HasRelationship
+                            ? liveEntity->Relationship.Parent
+                            : UUID(0);
+      Entity parent = parentUUID != 0 ? m_Context->GetEntityByUUID(parentUUID)
+                                      : Entity();
+
+      ImGui::Columns(2);
+      ImGui::SetColumnWidth(0, 80.0f);
+      ImGui::Text("Parent");
+      ImGui::NextColumn();
+      ImGui::TextUnformatted(parent.GetID() != -1 ? parent.Name.c_str()
+                                                   : "None");
+      ImGui::Columns(1);
+
+      ImGui::Button("Drop Parent Here", ImVec2(-1.0f, 24.0f));
+      if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload *payload =
+                ImGui::AcceptDragDropPayload("SCENE_HIERARCHY_ITEM")) {
+          int droppedID = *(const int *)payload->Data;
+          Entity *newParent = m_Context->GetEntityByID(droppedID);
+          if (newParent && newParent->GetID() != liveEntity->GetID() &&
+              !m_Context->WouldCreateCycle(liveEntity->GetUUID(),
+                                           newParent->GetUUID())) {
+            if (m_OnHistorySaveCallback)
+              m_OnHistorySaveCallback();
+            m_Context->SetParent(liveEntity->GetUUID(), newParent->GetUUID(),
+                                 true);
+          }
+        }
+        ImGui::EndDragDropTarget();
+      }
+
+      ImGui::BeginDisabled(parentUUID == 0);
+      if (ImGui::Button("Make Root", ImVec2(-1.0f, 24.0f))) {
+        if (m_OnHistorySaveCallback)
+          m_OnHistorySaveCallback();
+        m_Context->ClearParent(liveEntity->GetUUID(), true);
+      }
+      ImGui::EndDisabled();
+
+      int childCount = liveEntity->HasRelationship
+                           ? (int)liveEntity->Relationship.Children.size()
+                           : 0;
+      ImGui::Text("Children: %d", childCount);
+    }
+  }
+
   DrawComponent<SpriteRendererComponent>(
       "Sprite Renderer", entity, entity->HasSpriteRenderer,
       entity->SpriteRenderer,
@@ -674,7 +708,6 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
           }
           ImGui::EndDragDropTarget();
         }
-
 
         ImGui::Columns(2);
         ImGui::SetColumnWidth(0, 100.0f);
@@ -982,6 +1015,26 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
         }
 
         ImGui::Separator();
+        ImGui::TextUnformatted("Material");
+        if (ImGui::SliderFloat("Metallic", &component.Metallic, 0.0f, 1.0f))
+          changed = true;
+        if (ImGui::SliderFloat("Roughness", &component.Roughness, 0.04f, 1.0f))
+          changed = true;
+        if (ImGui::SliderFloat("AO", &component.AO, 0.0f, 1.0f))
+          changed = true;
+        if (ImGui::Checkbox("Casts Shadow", &component.CastsShadow))
+          changed = true;
+        if (ImGui::Checkbox("Receives Shadow", &component.ReceivesShadow))
+          changed = true;
+        if (ImGui::Checkbox("Receives SSR", &component.ReceivesSSR))
+          changed = true;
+        if (ImGui::SliderFloat("SSR Intensity", &component.SSRIntensity,
+                               0.0f, 2.0f))
+          changed = true;
+        if (ImGui::Checkbox("Planar Reflection", &component.IsReflective))
+          changed = true;
+
+        ImGui::Separator();
         ImGui::Text("Level of Detail (LOD)");
         if (ImGui::Button("Add LOD")) {
           component.LODs.push_back({nullptr, 100.0f});
@@ -1027,6 +1080,8 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
           ImGui::PopID();
         }
 
+        if (changed)
+          m_Context->UpdateEntity(*entity);
         ImGui::PopID();
       },
       m_OnHistorySaveCallback, [&]() { m_Context->UpdateEntity(*entity); });
@@ -1038,14 +1093,14 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
         bool changed = false;
 
         int lightType = (int)component.Type;
-        const char *lightTypeStrings[] = {"Directional", "Point"};
+        const char *lightTypeStrings[] = {"Directional", "Point", "Spot", "Area"};
         ImGui::Columns(2);
         ImGui::SetColumnWidth(0, 100.0f);
 
         ImGui::Text("Light Type");
         ImGui::NextColumn();
         ImGui::PushItemWidth(-1.0f);
-        if (ImGui::Combo("##Light Type", &lightType, lightTypeStrings, 2)) {
+        if (ImGui::Combo("##Light Type", &lightType, lightTypeStrings, 4)) {
           if (m_OnHistorySaveCallback)
             m_OnHistorySaveCallback();
           component.Type = (LightComponent::LightType)lightType;
@@ -1053,6 +1108,13 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
         }
         ImGui::PopItemWidth();
         ImGui::Columns(1);
+
+        if (component.Type == LightComponent::LightType::Spot) {
+          if (ImGui::DragFloat("Spot Inner (deg)", &component.SpotInner, 0.5f, 1.0f, 89.0f)) changed = true;
+          if (ImGui::DragFloat("Spot Outer (deg)", &component.SpotOuter, 0.5f, 1.0f, 89.0f)) changed = true;
+        } else if (component.Type == LightComponent::LightType::Area) {
+          if (ImGui::DragFloat2("Area Size", glm::value_ptr(component.AreaSize), 0.1f, 0.1f, 50.0f)) changed = true;
+        }
 
         if (ImGui::ColorEdit3("Color", glm::value_ptr(component.Color)))
           changed = true;
@@ -1073,8 +1135,60 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
             m_OnHistorySaveCallback();
         }
 
+        if (component.Type == LightComponent::LightType::Directional) {
+          if (ImGui::Checkbox("Cast Shadows", &component.CastShadows))
+            changed = true;
+          if (ImGui::DragFloat("Shadow Distance", &component.ShadowDistance,
+                               0.5f, 1.0f, 200.0f))
+            changed = true;
+          if (ImGui::DragFloat("Shadow Bias", &component.ShadowBias, 0.01f,
+                               0.01f, 5.0f))
+            changed = true;
+          if (ImGui::SliderInt("Shadow PCF Radius",
+                               &component.ShadowPCFRadius, 0, 4))
+            changed = true;
+        }
+
         if (changed)
           m_Context->UpdateEntity(*entity);
+        ImGui::PopID();
+      },
+      m_OnHistorySaveCallback, [&]() { m_Context->UpdateEntity(*entity); });
+
+  DrawComponent<ParticleSystemComponent>(
+      "Particle System", entity, entity->HasParticleSystem, entity->ParticleSystem,
+      [&](auto &component) {
+        ImGui::PushID("ParticleSystem");
+        bool changed = false;
+        if (ImGui::DragInt("Max Particles", &component.MaxParticles, 1.0f, 1, 100000))
+          changed = true;
+        if (ImGui::DragFloat("Emit Rate", &component.EmitRate, 0.5f, 0.0f, 10000.0f))
+          changed = true;
+        if (ImGui::DragFloat("Lifetime", &component.Lifetime, 0.05f, 0.01f, 60.0f))
+          changed = true;
+        if (ImGui::DragFloat3("Start Velocity", glm::value_ptr(component.StartVelocity), 0.1f))
+          changed = true;
+        if (ImGui::DragFloat3("Velocity Variance", glm::value_ptr(component.VelocityVariance), 0.05f, 0.0f, 50.0f))
+          changed = true;
+        if (ImGui::DragFloat3("Gravity", glm::value_ptr(component.Gravity), 0.1f))
+          changed = true;
+        if (ImGui::DragFloat("Start Size", &component.StartSize, 0.01f, 0.0f, 50.0f))
+          changed = true;
+        if (ImGui::DragFloat("End Size", &component.EndSize, 0.01f, 0.0f, 50.0f))
+          changed = true;
+        if (ImGui::ColorEdit4("Start Color", glm::value_ptr(component.StartColor)))
+          changed = true;
+        if (ImGui::ColorEdit4("End Color", glm::value_ptr(component.EndColor)))
+          changed = true;
+        if (ImGui::Checkbox("Loop", &component.Loop)) changed = true;
+        ImGui::SameLine();
+        if (ImGui::Checkbox("World Space", &component.WorldSpace)) changed = true;
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Additive Blend", &component.AdditiveBlend)) changed = true;
+        if (changed) {
+          component.Initialized = false;
+          m_Context->UpdateEntity(*entity);
+        }
         ImGui::PopID();
       },
       m_OnHistorySaveCallback, [&]() { m_Context->UpdateEntity(*entity); });
@@ -1145,7 +1259,6 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
           ImGui::EndDragDropTarget();
         }
 
-        // Settings
         if (ImGui::DragFloat("Volume", &component.Volume, 0.01f, 0.0f, 1.0f))
           m_Context->UpdateEntity(*entity);
         if (ImGui::DragFloat("Pitch", &component.Pitch, 0.01f, 0.1f, 10.0f))
@@ -1168,7 +1281,43 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
       },
       m_OnHistorySaveCallback, [&]() { m_Context->UpdateEntity(*entity); });
 
-  // UI Components
+  DrawComponent<VRRigComponent>(
+      "VR Rig", entity, entity->HasVRRig, entity->VRRig,
+      [&](auto &c) {
+        ImGui::PushID("VRRig");
+
+        const char *locoItems[] = {"Smooth Move", "Teleport"};
+        int locoIdx = (int)c.Locomotion;
+        if (ImGui::Combo("Locomotion", &locoIdx, locoItems, 2))
+          c.Locomotion = (VRRigComponent::LocomotionMode)locoIdx;
+
+        ImGui::DragFloat("Move Speed (m/s)", &c.MoveSpeed, 0.1f, 0.0f, 20.0f);
+        ImGui::DragFloat("Snap Angle (deg)", &c.SnapAngleDeg, 1.0f, 15.0f, 90.0f);
+        ImGui::DragFloat("Player Height (m)", &c.PlayerHeight, 0.01f, 0.5f, 3.0f);
+        ImGui::Spacing();
+
+        ImGui::Checkbox("Comfort Vignette", &c.ComfortVignette);
+        ImGui::Checkbox("Show Controller Meshes", &c.ShowControllerMeshes);
+        if (c.ShowControllerMeshes) {
+          char lBuf[256]; strncpy(lBuf, c.LeftControllerMeshPath.c_str(),  255); lBuf[255] = 0;
+          char rBuf[256]; strncpy(rBuf, c.RightControllerMeshPath.c_str(), 255); rBuf[255] = 0;
+          if (ImGui::InputText("Left Controller Mesh",  lBuf, 256)) c.LeftControllerMeshPath  = lBuf;
+          if (ImGui::InputText("Right Controller Mesh", rBuf, 256)) c.RightControllerMeshPath = rBuf;
+        }
+        ImGui::Spacing();
+
+        ImGui::SeparatorText("Editor Preview (no headset)");
+        ImGui::Checkbox("Preview Mode", &c.PreviewMode);
+        if (c.PreviewMode) {
+          ImGui::DragFloat("Preview FOV", &c.PreviewFOV, 0.5f, 30.0f, 120.0f);
+          ImGui::TextDisabled("WASD + mouse to simulate HMD movement.");
+        }
+
+        m_Context->UpdateEntity(*entity);
+        ImGui::PopID();
+      },
+      m_OnHistorySaveCallback, [&]() { m_Context->UpdateEntity(*entity); });
+
   DrawComponent<RectTransformComponent>(
       "Rect Transform", entity, entity->HasRectTransform, entity->RectTransform,
       [&](auto &component) {
@@ -1291,7 +1440,6 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
         entity->HasBoxCollider = true;
         entity->BoxCollider = BoxColliderComponent();
 
-        // Auto-Size based on existing components
         if (entity->HasMeshRenderer && entity->MeshRenderer.Mesh) {
           entity->BoxCollider.Size =
               entity->MeshRenderer.Mesh->GetLocalDimensions();
@@ -1318,12 +1466,12 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
     }
 
     if (ImGui::BeginMenu("Scripts")) {
-      for (const auto &[name, instantiator] : ScriptRegistry::GetScripts()) {
+      for (const auto &name : Application::Get().GetGameModule().GetScriptNames()) {
         if (ImGui::MenuItem(name.c_str())) {
           if (!entity->HasScript) {
             if (m_OnHistorySaveCallback)
               m_OnHistorySaveCallback();
-            auto script = instantiator();
+            auto script = Application::Get().GetGameModule().CreateScript(name);
             entity->m_NativeScript.Instance = script;
             entity->m_NativeScript.DestroyScript =
                 [](NativeScriptComponent *nsc) {
@@ -1331,8 +1479,10 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
                   nsc->Instance = nullptr;
                 };
             entity->m_NativeScript.ScriptName = name;
-            script->m_Entity = entity;
-            script->OnCreate();
+            if (script) {
+              script->m_Entity = entity;
+              script->OnCreate();
+            }
             entity->HasScript = true;
             m_Context->UpdateEntity(*entity);
           }
@@ -1363,6 +1513,17 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
       ImGui::CloseCurrentPopup();
     }
 
+    if (ImGui::MenuItem("Particle System")) {
+      if (!entity->HasParticleSystem) {
+        if (m_OnHistorySaveCallback)
+          m_OnHistorySaveCallback();
+        entity->HasParticleSystem = true;
+        entity->ParticleSystem = ParticleSystemComponent();
+        m_Context->UpdateEntity(*entity);
+      }
+      ImGui::CloseCurrentPopup();
+    }
+
     if (ImGui::BeginMenu("UI")) {
       if (ImGui::MenuItem("Canvas")) {
         if (!entity->HasCanvas) {
@@ -1388,7 +1549,7 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
           if (m_OnHistorySaveCallback)
             m_OnHistorySaveCallback();
           entity->HasButton = true;
-          entity->HasImage = true; // Button usually needs image
+          entity->HasImage = true;
           entity->HasRectTransform = true;
           m_Context->UpdateEntity(*entity);
         }
@@ -1414,6 +1575,17 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
       ImGui::EndMenu();
     }
 
+    if (ImGui::MenuItem("VR Rig")) {
+      if (!entity->HasVRRig) {
+        if (m_OnHistorySaveCallback)
+          m_OnHistorySaveCallback();
+        entity->HasVRRig = true;
+        entity->VRRig = VRRigComponent();
+        m_Context->UpdateEntity(*entity);
+      }
+      ImGui::CloseCurrentPopup();
+    }
+
     ImGui::EndPopup();
   }
   DrawComponent<RectTransformComponent>(
@@ -1423,13 +1595,11 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
         ImGui::PushID("RectTransform");
         bool changed = false;
 
-        // Draw Presets
         if (DrawAnchorPresets(component))
           changed = true;
 
         ImGui::Separator();
 
-        // Anchors
         ImGui::Text("Anchors");
         ImGui::Columns(2);
         ImGui::SetColumnWidth(0, 100.0f);
@@ -1455,7 +1625,6 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
 
         ImGui::Separator();
 
-        // Pivot
         ImGui::Columns(2);
         ImGui::SetColumnWidth(0, 100.0f);
         ImGui::Text("Pivot");
@@ -1469,7 +1638,6 @@ void SceneHierarchyPanel::DrawComponents(Entity *entity) {
 
         ImGui::Separator();
 
-        // Position & Size
         ImGui::Columns(2);
         ImGui::SetColumnWidth(0, 100.0f);
         ImGui::Text("Position");

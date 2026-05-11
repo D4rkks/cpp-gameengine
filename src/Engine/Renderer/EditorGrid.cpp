@@ -28,11 +28,11 @@ vec3 UnprojectPoint(float x, float y, float z, mat4 viewProj) {
 void main() {
     v_ViewProjection = u_ViewProjection;
     vec3 p = aPos;
-    
+
     // Grid spanning screen
     v_NearPoint = UnprojectPoint(p.x, p.y, 0.0, u_ViewProjection).xyz;
     v_FarPoint = UnprojectPoint(p.x, p.y, 1.0, u_ViewProjection).xyz;
-    
+
     gl_Position = vec4(p, 1.0);
 }
 )";
@@ -55,17 +55,15 @@ vec4 grid(vec3 fragPos3D, float scale, bool drawAxis) {
     float line = min(grid.x, grid.y);
     float minimumz = min(derivative.y, 1.0);
     float minimumx = min(derivative.x, 1.0);
-    
+
     vec4 color = vec4(1.0, 1.0, 1.0, 1.0 - min(line, 1.0));
-    
 
     if(fragPos3D.x > -0.1 * minimumx && fragPos3D.x < 0.1 * minimumx)
         color.z = 1.0;
-        
 
     if(fragPos3D.z > -0.1 * minimumz && fragPos3D.z < 0.1 * minimumz)
         color.x = 1.0;
-        
+
     return color;
 }
 
@@ -77,19 +75,19 @@ float computeDepth(vec3 pos) {
 void main() {
     float t = -v_NearPoint.y / (v_FarPoint.y - v_NearPoint.y);
     vec3 fragPos3D = v_NearPoint + t * (v_FarPoint - v_NearPoint);
-    
+
     gl_FragDepth = computeDepth(fragPos3D);
-    
-    float linearDepth = computeDepth(fragPos3D) * 2.0 - 1.0; 
+
+    float linearDepth = computeDepth(fragPos3D) * 2.0 - 1.0;
     linearDepth = (2.0 * u_Near * u_Far) / (u_Far + u_Near - linearDepth * (u_Far - u_Near));
 
     float fading = max(0, (0.5 - linearDepth));
-    
+
     // Simple Grid
     FragColor = (grid(fragPos3D, 1.0, true) + grid(fragPos3D, 0.1, true)) * float(t > 0);
     // FragColor.a *= fading; // Disable fading to ensure visibility
     FragColor.a *= 0.8; // Constant alpha for now
-    
+
     if (t <= 0) discard;
 }
 )";
@@ -127,7 +125,6 @@ EditorGrid::EditorGrid() {
 
   glDeleteShader(vertexShader);
   glDeleteShader(fragmentShader);
-
 
   float vertices[] = {
       1.0f,  1.0f,  0.0f, 1.0f, 1.0f,

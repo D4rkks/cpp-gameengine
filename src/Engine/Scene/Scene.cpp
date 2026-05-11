@@ -1,7 +1,6 @@
 #include "Scene.h"
 #include "../Audio/AudioEngine.h"
 #include "../Renderer/Renderer.h"
-#include "../Scripting/ScriptRegistry.h"
 #include <algorithm>
 #include <btBulletDynamicsCommon.h>
 #include <filesystem>
@@ -9,6 +8,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtx/quaternion.hpp>
 #include <imgui.h>
 #include <iostream>
@@ -45,6 +45,35 @@ Entity Scene::CreateEntity(const std::string &name) {
 }
 
 void Scene::DestroyEntity(Entity entity) {
+  Entity *storedEntity = GetEntityByID(entity.GetID());
+  if (!storedEntity)
+    return;
+
+  std::vector<UUID> children;
+  if (storedEntity->HasRelationship)
+    children = storedEntity->Relationship.Children;
+
+  for (UUID childUUID : children) {
+    Entity *child = GetEntityByUUIDPtr(childUUID);
+    if (child)
+      DestroyEntity(*child);
+  }
+
+  UUID entityUUID = storedEntity->GetUUID();
+  UUID parentUUID = storedEntity->HasRelationship
+                        ? storedEntity->Relationship.Parent
+                        : UUID(0);
+  if (parentUUID != 0) {
+    Entity *parent = GetEntityByUUIDPtr(parentUUID);
+    if (parent && parent->HasRelationship) {
+      auto &siblings = parent->Relationship.Children;
+      siblings.erase(std::remove(siblings.begin(), siblings.end(), entityUUID),
+                     siblings.end());
+      parent->HasRelationship =
+          parent->Relationship.Parent != 0 || !siblings.empty();
+    }
+  }
+
   auto it = std::remove_if(
       m_Entities.begin(), m_Entities.end(),
       [&](const Entity &e) { return e.GetID() == entity.GetID(); });
@@ -55,7 +84,9 @@ void Scene::DestroyEntity(Entity entity) {
 void Scene::Clear() { m_Entities.clear(); }
 
 void Scene::OnUpdate(float ts) {
-  // Update Scripts
+  for (auto &system : m_Systems)
+    system->OnRuntimeUpdate(*this, ts);
+
   for (auto &entity : m_Entities) {
     if (entity.HasScript) {
       if (entity.m_NativeScript.Instance) {
@@ -73,19 +104,48 @@ void Scene::OnUpdate(float ts) {
   }
 
   if (m_PhysicsWorld) {
+
+    float waterY = -1e9f;
+    bool hasWater = false;
+    for (const auto &e : m_Entities) {
+      if (e.HasWater) {
+        waterY = e.Transform.Translation.y;
+        hasWater = true;
+        break;
+      }
+    }
+    if (hasWater) {
+      auto *world = (btDiscreteDynamicsWorld *)m_PhysicsWorld;
+      for (auto &entity : m_Entities) {
+        if (!entity.HasRigidBody || entity.RigidBody.Type !=
+            RigidBodyComponent::BodyType::Dynamic) continue;
+        auto *body = (btRigidBody *)entity.RigidBody.RuntimeBody;
+        if (!body) continue;
+        btVector3 p = body->getWorldTransform().getOrigin();
+        float depth = waterY - p.y();
+        if (depth > 0.0f) {
+          float massBuoy = entity.RigidBody.Mass;
+
+          float submerged = std::min(depth, 1.0f);
+          float upForce = 35.0f * massBuoy * submerged;
+          body->applyCentralForce(btVector3(0, upForce, 0));
+
+          btVector3 v = body->getLinearVelocity();
+          v *= 0.92f;
+          body->setLinearVelocity(v);
+          body->activate(true);
+        }
+      }
+    }
+
     ((btDiscreteDynamicsWorld *)m_PhysicsWorld)->stepSimulation(ts, 10);
 
     {
       auto primaryCameraEntity = GetPrimaryCameraEntity();
       if (primaryCameraEntity) {
-        // Extract vectors from Transform (Quaternions handling)
-        const auto &trans = primaryCameraEntity->Transform;
-        glm::mat4 transform =
-            glm::translate(glm::mat4(1.0f), trans.Translation) *
-            glm::toMat4(glm::quat(trans.Rotation)) *
-            glm::scale(glm::mat4(1.0f), trans.Scale);
+        glm::mat4 transform = GetWorldTransform(*primaryCameraEntity);
 
-        glm::vec3 pos = trans.Translation;
+        glm::vec3 pos = glm::vec3(transform[3]);
         glm::vec3 up = glm::vec3(transform[1]);
         glm::vec3 forward = -glm::vec3(transform[2]);
 
@@ -101,11 +161,11 @@ void Scene::OnUpdate(float ts) {
                     << std::endl;
           AudioEngine::PlaySound(audio.FilePath, audio.Volume, audio.Loop,
                                  audio.Spatial, audio.Range,
-                                 entity.Transform.Translation);
+                                 glm::vec3(GetWorldTransform(entity)[3]));
           audio.IsPlaying = true;
         } else if (audio.IsPlaying) {
           AudioEngine::SetVoicePosition(audio.FilePath,
-                                        entity.Transform.Translation);
+                                        glm::vec3(GetWorldTransform(entity)[3]));
         }
       }
     }
@@ -164,6 +224,9 @@ void Scene::OnUpdate(float ts) {
 }
 
 void Scene::OnUpdateEditor(float ts) {
+  for (auto &system : m_Systems)
+    system->OnEditorUpdate(*this, ts);
+
   if (!m_SkyTexturePath.empty()) {
     if (!m_SkyTexture || m_SkyTexture->GetPath() != m_SkyTexturePath) {
       std::string path = m_SkyTexturePath;
@@ -204,6 +267,193 @@ Entity Scene::GetEntityByUUID(UUID uuid) {
       return entity;
   }
   return Entity();
+}
+
+Entity *Scene::GetEntityByUUIDPtr(UUID uuid) {
+  for (auto &entity : m_Entities) {
+    if (entity.GetUUID() == uuid)
+      return &entity;
+  }
+  return nullptr;
+}
+
+const Entity *Scene::GetEntityByUUIDPtr(UUID uuid) const {
+  for (const auto &entity : m_Entities) {
+    if (entity.GetUUID() == uuid)
+      return &entity;
+  }
+  return nullptr;
+}
+
+Entity *Scene::GetEntityByID(int id) {
+  for (auto &entity : m_Entities) {
+    if (entity.GetID() == id)
+      return &entity;
+  }
+  return nullptr;
+}
+
+const Entity *Scene::GetEntityByID(int id) const {
+  for (const auto &entity : m_Entities) {
+    if (entity.GetID() == id)
+      return &entity;
+  }
+  return nullptr;
+}
+
+glm::mat4 Scene::GetLocalTransform(const Entity &entity) const {
+  return glm::translate(glm::mat4(1.0f), entity.Transform.Translation) *
+         glm::toMat4(glm::quat(entity.Transform.Rotation)) *
+         glm::scale(glm::mat4(1.0f), entity.Transform.Scale);
+}
+
+glm::mat4 Scene::GetWorldTransform(UUID uuid) const {
+  const Entity *entity = GetEntityByUUIDPtr(uuid);
+  if (!entity)
+    return glm::mat4(1.0f);
+
+  glm::mat4 local = GetLocalTransform(*entity);
+  if (!entity->HasRelationship || entity->Relationship.Parent == 0)
+    return local;
+
+  const Entity *parent = GetEntityByUUIDPtr(entity->Relationship.Parent);
+  if (!parent)
+    return local;
+
+  return GetWorldTransform(parent->GetUUID()) * local;
+}
+
+void Scene::SetLocalTransformFromMatrix(Entity &entity,
+                                        const glm::mat4 &matrix) {
+  glm::vec3 skew;
+  glm::vec4 perspective;
+  glm::quat orientation;
+  glm::decompose(matrix, entity.Transform.Scale, orientation,
+                 entity.Transform.Translation, skew, perspective);
+  entity.Transform.Rotation = glm::eulerAngles(glm::normalize(orientation));
+}
+
+bool Scene::WouldCreateCycle(UUID childUUID, UUID parentUUID) const {
+  if (childUUID == 0 || parentUUID == 0)
+    return false;
+  if (childUUID == parentUUID)
+    return true;
+
+  UUID cursor = parentUUID;
+  std::vector<UUID> visited;
+  while (cursor != 0) {
+    if (cursor == childUUID)
+      return true;
+    if (std::find(visited.begin(), visited.end(), cursor) != visited.end())
+      return true;
+    visited.push_back(cursor);
+
+    const Entity *entity = GetEntityByUUIDPtr(cursor);
+    if (!entity || !entity->HasRelationship)
+      return false;
+    cursor = entity->Relationship.Parent;
+  }
+
+  return false;
+}
+
+bool Scene::SetParent(UUID childUUID, UUID parentUUID,
+                      bool keepWorldTransform) {
+  Entity *child = GetEntityByUUIDPtr(childUUID);
+  if (!child)
+    return false;
+
+  if (parentUUID != 0 && !GetEntityByUUIDPtr(parentUUID))
+    return false;
+
+  if (WouldCreateCycle(childUUID, parentUUID))
+    return false;
+
+  glm::mat4 worldTransform = GetWorldTransform(childUUID);
+
+  UUID oldParentUUID =
+      child->HasRelationship ? child->Relationship.Parent : UUID(0);
+  if (oldParentUUID != 0) {
+    Entity *oldParent = GetEntityByUUIDPtr(oldParentUUID);
+    if (oldParent && oldParent->HasRelationship) {
+      auto &children = oldParent->Relationship.Children;
+      children.erase(std::remove(children.begin(), children.end(), childUUID),
+                     children.end());
+      oldParent->HasRelationship =
+          oldParent->Relationship.Parent != 0 || !children.empty();
+    }
+  }
+
+  child = GetEntityByUUIDPtr(childUUID);
+  child->HasRelationship = true;
+  child->Relationship.Parent = parentUUID;
+
+  if (parentUUID != 0) {
+    Entity *parent = GetEntityByUUIDPtr(parentUUID);
+    parent->HasRelationship = true;
+    auto &children = parent->Relationship.Children;
+    if (std::find(children.begin(), children.end(), childUUID) ==
+        children.end()) {
+      children.push_back(childUUID);
+    }
+  }
+
+  if (keepWorldTransform) {
+    glm::mat4 localTransform = worldTransform;
+    if (parentUUID != 0)
+      localTransform = glm::inverse(GetWorldTransform(parentUUID)) *
+                       worldTransform;
+
+    child = GetEntityByUUIDPtr(childUUID);
+    SetLocalTransformFromMatrix(*child, localTransform);
+  }
+
+  child = GetEntityByUUIDPtr(childUUID);
+  child->HasRelationship =
+      child->Relationship.Parent != 0 || !child->Relationship.Children.empty();
+
+  return true;
+}
+
+bool Scene::IsRootEntity(const Entity &entity) const {
+  if (!entity.HasRelationship || entity.Relationship.Parent == 0)
+    return true;
+
+  return GetEntityByUUIDPtr(entity.Relationship.Parent) == nullptr;
+}
+
+void Scene::NormalizeHierarchy() {
+  for (auto &entity : m_Entities) {
+    if (!entity.HasRelationship)
+      entity.Relationship.Parent = 0;
+    entity.Relationship.Children.clear();
+  }
+
+  for (auto &entity : m_Entities) {
+    UUID parentUUID =
+        entity.HasRelationship ? entity.Relationship.Parent : UUID(0);
+    if (parentUUID == 0)
+      continue;
+
+    if (!GetEntityByUUIDPtr(parentUUID) ||
+        WouldCreateCycle(entity.GetUUID(), parentUUID)) {
+      entity.Relationship.Parent = 0;
+      continue;
+    }
+
+    Entity *parent = GetEntityByUUIDPtr(parentUUID);
+    parent->HasRelationship = true;
+    auto &children = parent->Relationship.Children;
+    if (std::find(children.begin(), children.end(), entity.GetUUID()) ==
+        children.end()) {
+      children.push_back(entity.GetUUID());
+    }
+  }
+
+  for (auto &entity : m_Entities) {
+    entity.HasRelationship =
+        entity.Relationship.Parent != 0 || !entity.Relationship.Children.empty();
+  }
 }
 
 Entity *FindEntityByUUID(std::vector<Entity> &entities, UUID uuid) {
@@ -343,10 +593,61 @@ void Scene::OnPhysicsStart() {
       ->setGravity(btVector3(0, -25.0f, 0));
 
   for (auto &entity : m_Entities) {
-    if (entity.HasRigidBody && entity.HasBoxCollider) {
+    btCollisionShape *shape = nullptr;
+    if (entity.HasRigidBody && entity.HasMeshCollider &&
+        entity.HasMeshRenderer && entity.MeshRenderer.Mesh) {
+      auto &mesh = entity.MeshRenderer.Mesh;
+      const auto &verts = mesh->GetVertices();
+      const auto &inds  = mesh->GetIndices();
+      glm::vec3 sc = entity.Transform.Scale;
+      if (entity.MeshCollider.Convex) {
+
+        auto *hull = new btConvexHullShape();
+        for (const auto &v : verts) {
+          hull->addPoint(btVector3(v.Position.x * sc.x,
+                                   v.Position.y * sc.y,
+                                   v.Position.z * sc.z),
+                         false);
+        }
+        hull->recalcLocalAabb();
+        shape = hull;
+        entity.MeshCollider.RuntimeShape = hull;
+      } else {
+
+        auto *tm = new btTriangleMesh();
+        for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+          const auto &p0 = verts[inds[i+0]].Position;
+          const auto &p1 = verts[inds[i+1]].Position;
+          const auto &p2 = verts[inds[i+2]].Position;
+          tm->addTriangle(btVector3(p0.x*sc.x, p0.y*sc.y, p0.z*sc.z),
+                          btVector3(p1.x*sc.x, p1.y*sc.y, p1.z*sc.z),
+                          btVector3(p2.x*sc.x, p2.y*sc.y, p2.z*sc.z));
+        }
+        auto *bvh = new btBvhTriangleMeshShape(tm, true);
+        shape = bvh;
+        entity.MeshCollider.RuntimeShape = bvh;
+        entity.MeshCollider.RuntimeMesh  = tm;
+      }
+    }
+    if (entity.HasRigidBody && entity.HasBoxCollider && !shape) {
       glm::vec3 size = entity.BoxCollider.Size * entity.Transform.Scale;
-      btCollisionShape *shape = new btBoxShape(
+      shape = new btBoxShape(
           btVector3(size.x * 0.5f, size.y * 0.5f, size.z * 0.5f));
+    }
+    if (entity.HasRigidBody && entity.HasSphereCollider && !shape) {
+      float r = entity.SphereCollider.Radius *
+                std::max({entity.Transform.Scale.x, entity.Transform.Scale.y,
+                          entity.Transform.Scale.z});
+      shape = new btSphereShape(r);
+    }
+    if (entity.HasRigidBody && entity.HasCapsuleCollider && !shape) {
+      float r = entity.CapsuleCollider.Radius *
+                std::max(entity.Transform.Scale.x, entity.Transform.Scale.z);
+      float h = entity.CapsuleCollider.Height * entity.Transform.Scale.y;
+      shape = new btCapsuleShape(r, h);
+    }
+
+    if (entity.HasRigidBody && shape) {
       btTransform startTransform;
       startTransform.setIdentity();
       startTransform.setOrigin(btVector3(entity.Transform.Translation.x,
@@ -356,10 +657,11 @@ void Scene::OnPhysicsStart() {
       glm::quat q(entity.Transform.Rotation);
       startTransform.setRotation(btQuaternion(q.x, q.y, q.z, q.w));
 
-      btScalar mass =
-          (entity.RigidBody.Type == RigidBodyComponent::BodyType::Dynamic)
-              ? entity.RigidBody.Mass
-              : 0.0f;
+      bool isTriangleMesh = entity.HasMeshCollider && !entity.MeshCollider.Convex;
+      btScalar mass = (entity.RigidBody.Type == RigidBodyComponent::BodyType::Dynamic
+                       && !isTriangleMesh)
+                          ? entity.RigidBody.Mass
+                          : 0.0f;
       btVector3 localInertia(0, 0, 0);
       if (mass != 0.0f)
         shape->calculateLocalInertia(mass, localInertia);
@@ -374,7 +676,6 @@ void Scene::OnPhysicsStart() {
       }
 
       entity.RigidBody.RuntimeBody = body;
-
       ((btDiscreteDynamicsWorld *)m_PhysicsWorld)->addRigidBody(body);
     }
   }
@@ -424,4 +725,4 @@ glm::vec3 ScriptableEntity::GetLinearVelocity() {
   return {0.0f, 0.0f, 0.0f};
 }
 
-} // namespace Engine
+}

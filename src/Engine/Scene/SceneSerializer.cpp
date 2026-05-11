@@ -1,7 +1,10 @@
 #include "SceneSerializer.h"
 #include "../Renderer/Texture.h"
-#include "../Scripting/ScriptRegistry.h"
+#include "../Core/Application.h"
+#include "../Scripts/CameraController.h"
+#include "../Scripts/FollowPlayer.h"
 #include "../Scripts/PlayerController.h"
+#include "../Scripting/GameModule.h"
 #include "Entity.h"
 #include <fstream>
 #include <iostream>
@@ -11,6 +14,25 @@ namespace Engine {
 
 SceneSerializer::SceneSerializer(const std::shared_ptr<Scene> &scene)
     : m_Scene(scene) {}
+
+namespace {
+bool BindBuiltInScript(NativeScriptComponent &script,
+                       const std::string &scriptName) {
+  if (scriptName == "PlayerController") {
+    script.Bind<PlayerController>(scriptName);
+    return true;
+  }
+  if (scriptName == "CameraController") {
+    script.Bind<CameraController>(scriptName);
+    return true;
+  }
+  if (scriptName == "FollowPlayer") {
+    script.Bind<FollowPlayer>(scriptName);
+    return true;
+  }
+  return false;
+}
+}
 
 #define WRITE_VEC2(vec)                                                        \
   out << YAML::Flow << YAML::BeginSeq << vec.x << vec.y << YAML::EndSeq
@@ -98,6 +120,71 @@ static void SerializeEntity(YAML::Emitter &out, const Entity &entity) {
         out << YAML::Key << "SpinningFriction" << YAML::Value
             << c.SpinningFriction;
         out << YAML::Key << "Restitution" << YAML::Value << c.Restitution;
+      });
+
+  SerializeComponent<WaterComponent>(
+      out, entity, "WaterComponent", entity.HasWater, entity.Water,
+      [](YAML::Emitter &out, const auto &c) {
+        out << YAML::Key << "ShallowColor" << YAML::Value << YAML::Flow
+            << YAML::BeginSeq << c.ShallowColor.r << c.ShallowColor.g << c.ShallowColor.b << YAML::EndSeq;
+        out << YAML::Key << "DeepColor"    << YAML::Value << YAML::Flow
+            << YAML::BeginSeq << c.DeepColor.r << c.DeepColor.g << c.DeepColor.b << YAML::EndSeq;
+        out << YAML::Key << "FoamColor"    << YAML::Value << YAML::Flow
+            << YAML::BeginSeq << c.FoamColor.r << c.FoamColor.g << c.FoamColor.b << YAML::EndSeq;
+        out << YAML::Key << "WaveAmplitude" << YAML::Value << c.WaveAmplitude;
+        out << YAML::Key << "WaveSteepness" << YAML::Value << c.WaveSteepness;
+        out << YAML::Key << "WaveSpeed"     << YAML::Value << c.WaveSpeed;
+        out << YAML::Key << "WaveScale"     << YAML::Value << c.WaveScale;
+        out << YAML::Key << "FresnelPower"  << YAML::Value << c.FresnelPower;
+        out << YAML::Key << "Refraction"    << YAML::Value << c.Refraction;
+        out << YAML::Key << "DepthFade"     << YAML::Value << c.DepthFade;
+        out << YAML::Key << "FoamThreshold" << YAML::Value << c.FoamThreshold;
+      });
+
+  SerializeComponent<SphereColliderComponent>(
+      out, entity, "SphereColliderComponent", entity.HasSphereCollider,
+      entity.SphereCollider, [](YAML::Emitter &out, const auto &c) {
+        out << YAML::Key << "Radius"      << YAML::Value << c.Radius;
+        out << YAML::Key << "Friction"    << YAML::Value << c.Friction;
+        out << YAML::Key << "Restitution" << YAML::Value << c.Restitution;
+      });
+  SerializeComponent<CapsuleColliderComponent>(
+      out, entity, "CapsuleColliderComponent", entity.HasCapsuleCollider,
+      entity.CapsuleCollider, [](YAML::Emitter &out, const auto &c) {
+        out << YAML::Key << "Radius"      << YAML::Value << c.Radius;
+        out << YAML::Key << "Height"      << YAML::Value << c.Height;
+        out << YAML::Key << "Friction"    << YAML::Value << c.Friction;
+        out << YAML::Key << "Restitution" << YAML::Value << c.Restitution;
+      });
+
+  SerializeComponent<MeshColliderComponent>(
+      out, entity, "MeshColliderComponent", entity.HasMeshCollider,
+      entity.MeshCollider, [](YAML::Emitter &out, const auto &c) {
+        out << YAML::Key << "Convex" << YAML::Value << c.Convex;
+      });
+
+  SerializeComponent<ParticleSystemComponent>(
+      out, entity, "ParticleSystemComponent", entity.HasParticleSystem,
+      entity.ParticleSystem, [](YAML::Emitter &out, const auto &c) {
+        out << YAML::Key << "MaxParticles"   << YAML::Value << c.MaxParticles;
+        out << YAML::Key << "EmitRate"       << YAML::Value << c.EmitRate;
+        out << YAML::Key << "Lifetime"       << YAML::Value << c.Lifetime;
+        out << YAML::Key << "StartVelocity"  << YAML::Value << YAML::Flow
+            << YAML::BeginSeq << c.StartVelocity.x << c.StartVelocity.y << c.StartVelocity.z << YAML::EndSeq;
+        out << YAML::Key << "VelocityVariance" << YAML::Value << YAML::Flow
+            << YAML::BeginSeq << c.VelocityVariance.x << c.VelocityVariance.y << c.VelocityVariance.z << YAML::EndSeq;
+        out << YAML::Key << "Gravity"        << YAML::Value << YAML::Flow
+            << YAML::BeginSeq << c.Gravity.x << c.Gravity.y << c.Gravity.z << YAML::EndSeq;
+        out << YAML::Key << "StartSize"      << YAML::Value << c.StartSize;
+        out << YAML::Key << "EndSize"        << YAML::Value << c.EndSize;
+        out << YAML::Key << "StartColor"     << YAML::Value << YAML::Flow
+            << YAML::BeginSeq << c.StartColor.r << c.StartColor.g << c.StartColor.b << c.StartColor.a << YAML::EndSeq;
+        out << YAML::Key << "EndColor"       << YAML::Value << YAML::Flow
+            << YAML::BeginSeq << c.EndColor.r << c.EndColor.g << c.EndColor.b << c.EndColor.a << YAML::EndSeq;
+        out << YAML::Key << "Loop"           << YAML::Value << c.Loop;
+        out << YAML::Key << "WorldSpace"     << YAML::Value << c.WorldSpace;
+        out << YAML::Key << "AdditiveBlend"  << YAML::Value << c.AdditiveBlend;
+        out << YAML::Key << "TexturePath"    << YAML::Value << c.TexturePath;
       });
 
   SerializeComponent<BoxColliderComponent>(
@@ -225,6 +312,14 @@ static void SerializeEntity(YAML::Emitter &out, const Entity &entity) {
             << c.Color.b << YAML::EndSeq;
         out << YAML::Key << "Intensity" << YAML::Value << c.Intensity;
         out << YAML::Key << "Radius" << YAML::Value << c.Radius;
+        out << YAML::Key << "CastShadows" << YAML::Value << c.CastShadows;
+        out << YAML::Key << "ShadowDistance" << YAML::Value << c.ShadowDistance;
+        out << YAML::Key << "ShadowBias" << YAML::Value << c.ShadowBias;
+        out << YAML::Key << "ShadowPCFRadius" << YAML::Value << c.ShadowPCFRadius;
+        out << YAML::Key << "SpotInner" << YAML::Value << c.SpotInner;
+        out << YAML::Key << "SpotOuter" << YAML::Value << c.SpotOuter;
+        out << YAML::Key << "AreaSize"  << YAML::Value
+            << YAML::Flow << YAML::BeginSeq << c.AreaSize.x << c.AreaSize.y << YAML::EndSeq;
       });
 
   SerializeComponent<MeshRendererComponent>(
@@ -235,6 +330,14 @@ static void SerializeEntity(YAML::Emitter &out, const Entity &entity) {
         WRITE_VEC4(c.Color);
         out << YAML::Key << "DiffusePath" << YAML::Value << c.DiffusePath;
         out << YAML::Key << "NormalPath" << YAML::Value << c.NormalPath;
+        out << YAML::Key << "Metallic"     << YAML::Value << c.Metallic;
+        out << YAML::Key << "Roughness"    << YAML::Value << c.Roughness;
+        out << YAML::Key << "AO"           << YAML::Value << c.AO;
+        out << YAML::Key << "CastsShadow" << YAML::Value << c.CastsShadow;
+        out << YAML::Key << "ReceivesShadow" << YAML::Value << c.ReceivesShadow;
+        out << YAML::Key << "ReceivesSSR" << YAML::Value << c.ReceivesSSR;
+        out << YAML::Key << "SSRIntensity" << YAML::Value << c.SSRIntensity;
+        out << YAML::Key << "IsReflective" << YAML::Value << c.IsReflective;
 
         if (!c.LODs.empty()) {
           out << YAML::Key << "LODs" << YAML::Value << YAML::BeginSeq;
@@ -272,6 +375,21 @@ static void SerializeEntity(YAML::Emitter &out, const Entity &entity) {
         out << YAML::Key << "Spatial" << YAML::Value << c.Spatial;
       });
 
+  SerializeComponent<VRRigComponent>(
+      out, entity, "VRRigComponent", entity.HasVRRig, entity.VRRig,
+      [](YAML::Emitter &out, const auto &c) {
+        out << YAML::Key << "Locomotion"              << YAML::Value << (int)c.Locomotion;
+        out << YAML::Key << "MoveSpeed"               << YAML::Value << c.MoveSpeed;
+        out << YAML::Key << "SnapAngleDeg"            << YAML::Value << c.SnapAngleDeg;
+        out << YAML::Key << "ComfortVignette"         << YAML::Value << c.ComfortVignette;
+        out << YAML::Key << "ShowControllerMeshes"    << YAML::Value << c.ShowControllerMeshes;
+        out << YAML::Key << "LeftControllerMeshPath"  << YAML::Value << c.LeftControllerMeshPath;
+        out << YAML::Key << "RightControllerMeshPath" << YAML::Value << c.RightControllerMeshPath;
+        out << YAML::Key << "PreviewMode"             << YAML::Value << c.PreviewMode;
+        out << YAML::Key << "PreviewFOV"              << YAML::Value << c.PreviewFOV;
+        out << YAML::Key << "PlayerHeight"            << YAML::Value << c.PlayerHeight;
+      });
+
   out << YAML::EndMap;
 }
 
@@ -298,7 +416,7 @@ static bool DeserializeEntity(YAML::Node entityNode,
         if (node["TilingFactor"])
           c.TilingFactor = node["TilingFactor"].as<float>();
         if (!c.TexturePath.empty())
-          c.Texture = std::make_shared<Texture2D>(c.TexturePath);
+          c.Texture = Texture2D::GetOrLoad(c.TexturePath);
       });
 
   DeserializeComponent<RigidBodyComponent>(
@@ -317,6 +435,99 @@ static bool DeserializeEntity(YAML::Node entityNode,
           c.SpinningFriction = node["SpinningFriction"].as<float>();
         if (node["Restitution"])
           c.Restitution = node["Restitution"].as<float>();
+      });
+
+  DeserializeComponent<WaterComponent>(
+      entityNode, "WaterComponent", deserializedEntity,
+      deserializedEntity.HasWater, deserializedEntity.Water,
+      [](YAML::Node &node, auto &c) {
+        if (node["ShallowColor"]) {
+          auto a = node["ShallowColor"];
+          c.ShallowColor = { a[0].as<float>(), a[1].as<float>(), a[2].as<float>() };
+        }
+        if (node["DeepColor"]) {
+          auto a = node["DeepColor"];
+          c.DeepColor = { a[0].as<float>(), a[1].as<float>(), a[2].as<float>() };
+        }
+        if (node["FoamColor"]) {
+          auto a = node["FoamColor"];
+          c.FoamColor = { a[0].as<float>(), a[1].as<float>(), a[2].as<float>() };
+        }
+        if (node["WaveAmplitude"]) c.WaveAmplitude = node["WaveAmplitude"].as<float>();
+        if (node["WaveSteepness"]) c.WaveSteepness = node["WaveSteepness"].as<float>();
+        if (node["WaveSpeed"])     c.WaveSpeed     = node["WaveSpeed"].as<float>();
+        if (node["WaveScale"])     c.WaveScale     = node["WaveScale"].as<float>();
+        if (node["FresnelPower"])  c.FresnelPower  = node["FresnelPower"].as<float>();
+        if (node["Refraction"])    c.Refraction    = node["Refraction"].as<float>();
+        if (node["DepthFade"])     c.DepthFade     = node["DepthFade"].as<float>();
+        if (node["FoamThreshold"]) c.FoamThreshold = node["FoamThreshold"].as<float>();
+      });
+
+  DeserializeComponent<SphereColliderComponent>(
+      entityNode, "SphereColliderComponent", deserializedEntity,
+      deserializedEntity.HasSphereCollider, deserializedEntity.SphereCollider,
+      [](YAML::Node &node, auto &c) {
+        if (node["Radius"])      c.Radius      = node["Radius"].as<float>();
+        if (node["Friction"])    c.Friction    = node["Friction"].as<float>();
+        if (node["Restitution"]) c.Restitution = node["Restitution"].as<float>();
+      });
+  DeserializeComponent<CapsuleColliderComponent>(
+      entityNode, "CapsuleColliderComponent", deserializedEntity,
+      deserializedEntity.HasCapsuleCollider, deserializedEntity.CapsuleCollider,
+      [](YAML::Node &node, auto &c) {
+        if (node["Radius"])      c.Radius      = node["Radius"].as<float>();
+        if (node["Height"])      c.Height      = node["Height"].as<float>();
+        if (node["Friction"])    c.Friction    = node["Friction"].as<float>();
+        if (node["Restitution"]) c.Restitution = node["Restitution"].as<float>();
+      });
+
+  DeserializeComponent<MeshColliderComponent>(
+      entityNode, "MeshColliderComponent", deserializedEntity,
+      deserializedEntity.HasMeshCollider, deserializedEntity.MeshCollider,
+      [](YAML::Node &node, auto &c) {
+        if (node["Convex"]) c.Convex = node["Convex"].as<bool>();
+      });
+
+  DeserializeComponent<ParticleSystemComponent>(
+      entityNode, "ParticleSystemComponent", deserializedEntity,
+      deserializedEntity.HasParticleSystem, deserializedEntity.ParticleSystem,
+      [](YAML::Node &node, auto &c) {
+        if (node["MaxParticles"]) c.MaxParticles = node["MaxParticles"].as<int>();
+        if (node["EmitRate"])     c.EmitRate     = node["EmitRate"].as<float>();
+        if (node["Lifetime"])     c.Lifetime     = node["Lifetime"].as<float>();
+        if (node["StartVelocity"] && node["StartVelocity"].size() == 3) {
+          c.StartVelocity = { node["StartVelocity"][0].as<float>(),
+                              node["StartVelocity"][1].as<float>(),
+                              node["StartVelocity"][2].as<float>() };
+        }
+        if (node["VelocityVariance"] && node["VelocityVariance"].size() == 3) {
+          c.VelocityVariance = { node["VelocityVariance"][0].as<float>(),
+                                 node["VelocityVariance"][1].as<float>(),
+                                 node["VelocityVariance"][2].as<float>() };
+        }
+        if (node["Gravity"] && node["Gravity"].size() == 3) {
+          c.Gravity = { node["Gravity"][0].as<float>(),
+                        node["Gravity"][1].as<float>(),
+                        node["Gravity"][2].as<float>() };
+        }
+        if (node["StartSize"]) c.StartSize = node["StartSize"].as<float>();
+        if (node["EndSize"])   c.EndSize   = node["EndSize"].as<float>();
+        if (node["StartColor"] && node["StartColor"].size() == 4) {
+          c.StartColor = { node["StartColor"][0].as<float>(),
+                           node["StartColor"][1].as<float>(),
+                           node["StartColor"][2].as<float>(),
+                           node["StartColor"][3].as<float>() };
+        }
+        if (node["EndColor"] && node["EndColor"].size() == 4) {
+          c.EndColor = { node["EndColor"][0].as<float>(),
+                         node["EndColor"][1].as<float>(),
+                         node["EndColor"][2].as<float>(),
+                         node["EndColor"][3].as<float>() };
+        }
+        if (node["Loop"])          c.Loop          = node["Loop"].as<bool>();
+        if (node["WorldSpace"])    c.WorldSpace    = node["WorldSpace"].as<bool>();
+        if (node["AdditiveBlend"]) c.AdditiveBlend = node["AdditiveBlend"].as<bool>();
+        if (node["TexturePath"])   c.TexturePath   = node["TexturePath"].as<std::string>();
       });
 
   DeserializeComponent<BoxColliderComponent>(
@@ -359,12 +570,15 @@ static bool DeserializeEntity(YAML::Node entityNode,
       [&](YAML::Node &node, auto &c) {
         if (node["Name"]) {
           std::string scriptName = node["Name"].as<std::string>();
-          ScriptableEntity *script = ScriptRegistry::Create(scriptName);
+          ScriptableEntity *script = Application::Get().GetGameModule().CreateScript(scriptName);
           if (script) {
             deserializedEntity.m_NativeScript.Instance = script;
             deserializedEntity.m_NativeScript.ScriptName = scriptName;
             script->m_Entity = &deserializedEntity;
             script->OnCreate();
+            deserializedEntity.HasScript = true;
+          } else if (BindBuiltInScript(deserializedEntity.m_NativeScript,
+                                       scriptName)) {
             deserializedEntity.HasScript = true;
           }
         }
@@ -379,6 +593,20 @@ static bool DeserializeEntity(YAML::Node entityNode,
         c.Intensity = node["Intensity"].as<float>();
         if (node["Radius"])
           c.Radius = node["Radius"].as<float>();
+        if (node["CastShadows"])
+          c.CastShadows = node["CastShadows"].as<bool>();
+        if (node["ShadowDistance"])
+          c.ShadowDistance = node["ShadowDistance"].as<float>();
+        if (node["ShadowBias"])
+          c.ShadowBias = node["ShadowBias"].as<float>();
+        if (node["ShadowPCFRadius"])
+          c.ShadowPCFRadius = node["ShadowPCFRadius"].as<int>();
+        if (node["SpotInner"]) c.SpotInner = node["SpotInner"].as<float>();
+        if (node["SpotOuter"]) c.SpotOuter = node["SpotOuter"].as<float>();
+        if (node["AreaSize"]) {
+          auto a = node["AreaSize"];
+          c.AreaSize = { a[0].as<float>(), a[1].as<float>() };
+        }
       });
 
   auto meshRendererComponent = entityNode["MeshRendererComponent"];
@@ -404,14 +632,31 @@ static bool DeserializeEntity(YAML::Node entityNode,
     if (meshRendererComponent["DiffusePath"]) {
       mrc.DiffusePath = meshRendererComponent["DiffusePath"].as<std::string>();
       if (!mrc.DiffusePath.empty())
-        mrc.DiffuseMap = std::make_shared<Texture2D>(mrc.DiffusePath);
+        mrc.DiffuseMap = Texture2D::GetOrLoad(mrc.DiffusePath);
     }
 
     if (meshRendererComponent["NormalPath"]) {
       mrc.NormalPath = meshRendererComponent["NormalPath"].as<std::string>();
       if (!mrc.NormalPath.empty())
-        mrc.NormalMap = std::make_shared<Texture2D>(mrc.NormalPath);
+        mrc.NormalMap = Texture2D::GetOrLoad(mrc.NormalPath);
     }
+
+    if (meshRendererComponent["Metallic"])
+      mrc.Metallic  = meshRendererComponent["Metallic"].as<float>();
+    if (meshRendererComponent["Roughness"])
+      mrc.Roughness = meshRendererComponent["Roughness"].as<float>();
+    if (meshRendererComponent["AO"])
+      mrc.AO        = meshRendererComponent["AO"].as<float>();
+    if (meshRendererComponent["CastsShadow"])
+      mrc.CastsShadow = meshRendererComponent["CastsShadow"].as<bool>();
+    if (meshRendererComponent["ReceivesShadow"])
+      mrc.ReceivesShadow = meshRendererComponent["ReceivesShadow"].as<bool>();
+    if (meshRendererComponent["ReceivesSSR"])
+      mrc.ReceivesSSR = meshRendererComponent["ReceivesSSR"].as<bool>();
+    if (meshRendererComponent["SSRIntensity"])
+      mrc.SSRIntensity = meshRendererComponent["SSRIntensity"].as<float>();
+    if (meshRendererComponent["IsReflective"])
+      mrc.IsReflective = meshRendererComponent["IsReflective"].as<bool>();
 
     deserializedEntity.HasMeshRenderer = true;
   }
@@ -512,6 +757,23 @@ static bool DeserializeEntity(YAML::Node entityNode,
           c.TextString = node["TextString"].as<std::string>();
         if (node["Color"])
           READ_VEC4(node["Color"], c.Color);
+      });
+
+  DeserializeComponent<VRRigComponent>(
+      entityNode, "VRRigComponent", deserializedEntity,
+      deserializedEntity.HasVRRig, deserializedEntity.VRRig,
+      [](YAML::Node &node, auto &c) {
+        if (node["Locomotion"])
+          c.Locomotion = (VRRigComponent::LocomotionMode)node["Locomotion"].as<int>();
+        if (node["MoveSpeed"])               c.MoveSpeed               = node["MoveSpeed"].as<float>();
+        if (node["SnapAngleDeg"])            c.SnapAngleDeg            = node["SnapAngleDeg"].as<float>();
+        if (node["ComfortVignette"])         c.ComfortVignette         = node["ComfortVignette"].as<bool>();
+        if (node["ShowControllerMeshes"])    c.ShowControllerMeshes    = node["ShowControllerMeshes"].as<bool>();
+        if (node["LeftControllerMeshPath"])  c.LeftControllerMeshPath  = node["LeftControllerMeshPath"].as<std::string>();
+        if (node["RightControllerMeshPath"]) c.RightControllerMeshPath = node["RightControllerMeshPath"].as<std::string>();
+        if (node["PreviewMode"])             c.PreviewMode             = node["PreviewMode"].as<bool>();
+        if (node["PreviewFOV"])              c.PreviewFOV              = node["PreviewFOV"].as<float>();
+        if (node["PlayerHeight"])            c.PlayerHeight            = node["PlayerHeight"].as<float>();
       });
 
   return true;
@@ -634,6 +896,7 @@ bool SceneSerializer::DeserializeFromString(const std::string &data) {
 
     }
   }
+  m_Scene->NormalizeHierarchy();
   return true;
 }
 
@@ -703,7 +966,8 @@ bool SceneSerializer::Deserialize(const std::string &filepath) {
 
     }
   }
+  m_Scene->NormalizeHierarchy();
   return true;
 }
 
-} // namespace Engine
+}

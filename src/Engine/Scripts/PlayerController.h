@@ -53,7 +53,9 @@ public:
     glm::quat q(glm::vec3(0.0f, m_Entity->Transform.Rotation.y, 0.0f));
     glm::vec3 rotatedDir = q * direction;
 
-    if (m_Entity->HasRigidBody) {
+    bool hasRuntimeBody =
+        m_Entity->HasRigidBody && m_Entity->RigidBody.RuntimeBody != nullptr;
+    if (hasRuntimeBody) {
       glm::vec3 movement = rotatedDir * speed;
       glm::vec3 currentVel = GetLinearVelocity();
       SetLinearVelocity({movement.x, currentVel.y, movement.z});
