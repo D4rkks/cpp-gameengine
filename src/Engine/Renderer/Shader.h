@@ -2,6 +2,7 @@
 
 #include <glm/glm.hpp>
 #include <string>
+#include <unordered_map>
 
 typedef unsigned int GLuint;
 
@@ -24,6 +25,8 @@ public:
   void UploadUniformInt(const std::string &name, int value);
 
 private:
+  int UniformLocation(const std::string &name);
+  std::unordered_map<std::string, int> m_UniformLocations;
   GLuint m_RendererID;
 };
 

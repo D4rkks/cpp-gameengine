@@ -1,3 +1,4 @@
+#include "../Renderer/Visibility.h"
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "Application.h"
 #include "../Scripts/CameraController.h"
@@ -19,7 +20,9 @@
 #include "../Audio/AudioEngine.h"
 #include "../Renderer/Buffer.h"
 #include "../Renderer/Framebuffer.h"
+#include "../Renderer/PlanarReflection.h"
 #include "../Renderer/RenderState.h"
+#include "../Renderer/RenderSettings.h"
 #include "../Renderer/Renderer.h"
 #include "../Renderer/Renderer2D.h"
 #include "../Renderer/Shader.h"
@@ -47,6 +50,8 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <functional>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
@@ -133,15 +138,104 @@ static bool RayIntersectsEntity(Scene &scene, const Ray &ray, Entity &entity,
   return t >= 0.0f;
 }
 
+namespace {
+uint32_t Crc32(uint32_t crc, const uint8_t *data, size_t len) {
+  static uint32_t table[256];
+  static bool tableReady = false;
+  if (!tableReady) {
+    for (uint32_t i = 0; i < 256; ++i) {
+      uint32_t c = i;
+      for (int k = 0; k < 8; ++k)
+        c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : (c >> 1);
+      table[i] = c;
+    }
+    tableReady = true;
+  }
+  crc = ~crc;
+  for (size_t i = 0; i < len; ++i)
+    crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+  return ~crc;
+}
+
+// Minimal PNG writer (stored, uncompressed deflate blocks) for screenshots.
+bool WritePNG(const std::string &path, const std::vector<uint8_t> &rgb,
+              int width, int height) {
+  std::vector<uint8_t> raw;
+  raw.reserve((size_t)(width * 3 + 1) * height);
+  for (int y = height - 1; y >= 0; --y) {  // GL rows are bottom-up
+    raw.push_back(0);
+    const uint8_t *row = rgb.data() + (size_t)y * width * 3;
+    raw.insert(raw.end(), row, row + (size_t)width * 3);
+  }
+
+  std::vector<uint8_t> zlib = {0x78, 0x01};
+  uint32_t a = 1, b = 0;
+  for (uint8_t v : raw) {
+    a = (a + v) % 65521;
+    b = (b + a) % 65521;
+  }
+  for (size_t pos = 0; pos < raw.size();) {
+    size_t len = std::min<size_t>(65535, raw.size() - pos);
+    bool last = pos + len == raw.size();
+    zlib.push_back(last ? 1 : 0);
+    zlib.push_back((uint8_t)(len & 0xFF));
+    zlib.push_back((uint8_t)(len >> 8));
+    zlib.push_back((uint8_t)(~len & 0xFF));
+    zlib.push_back((uint8_t)((~len >> 8) & 0xFF));
+    zlib.insert(zlib.end(), raw.begin() + pos, raw.begin() + pos + len);
+    pos += len;
+  }
+  uint32_t adler = (b << 16) | a;
+  for (int shift = 24; shift >= 0; shift -= 8)
+    zlib.push_back((uint8_t)(adler >> shift));
+
+  std::ofstream out(path, std::ios::binary);
+  if (!out)
+    return false;
+  auto writeU32 = [&](uint32_t v) {
+    uint8_t bytes[4] = {(uint8_t)(v >> 24), (uint8_t)(v >> 16), (uint8_t)(v >> 8),
+                        (uint8_t)v};
+    out.write((const char *)bytes, 4);
+  };
+  auto writeChunk = [&](const char *type, const std::vector<uint8_t> &data) {
+    writeU32((uint32_t)data.size());
+    out.write(type, 4);
+    if (!data.empty())
+      out.write((const char *)data.data(), (std::streamsize)data.size());
+    uint32_t crc = Crc32(0, (const uint8_t *)type, 4);
+    if (!data.empty())
+      crc = Crc32(crc, data.data(), data.size());
+    writeU32(crc);
+  };
+
+  const uint8_t signature[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+  out.write((const char *)signature, 8);
+  std::vector<uint8_t> header = {
+      (uint8_t)(width >> 24),  (uint8_t)(width >> 16),  (uint8_t)(width >> 8),
+      (uint8_t)width,          (uint8_t)(height >> 24), (uint8_t)(height >> 16),
+      (uint8_t)(height >> 8),  (uint8_t)height,         8, 2, 0, 0, 0};
+  writeChunk("IHDR", header);
+  writeChunk("IDAT", zlib);
+  writeChunk("IEND", {});
+  return (bool)out;
+}
+}
+
 Application *Application::s_Instance = nullptr;
 
 Application::Application(int argc, char** argv) {
   s_Instance = this;
+  bool requestVR = false;
+  for (int i = 1; i < argc; ++i)
+    if (std::string(argv[i]) == "--vr") requestVR = true;
+  WindowProps windowProps("Engine", 1280, 720);
+  windowProps.VR = requestVR;
 #ifdef GAME_MODE_RUNTIME
-  m_Window = new Window(WindowProps("Game (Runtime)", 1280, 720));
+  windowProps.Title = "Game (Runtime)";
+  m_Window = new Window(windowProps);
   m_AppState = AppState::Runtime;
 #else
-  m_Window = new Window(WindowProps("Engine", 1280, 720));
+  m_Window = new Window(windowProps);
   m_AppState = AppState::ProjectHub;
 #endif
   std::cout << "[App] Starting..." << std::endl;
@@ -149,7 +243,8 @@ Application::Application(int argc, char** argv) {
   Renderer2D::Init();
   AudioEngine::Init();
 
-  m_VRSystem.Init(m_Window->GetNativeWindow(), m_Window->GetContext());
+  if (requestVR && !m_VRSystem.Init(m_Window->GetNativeWindow(), m_Window->GetContext()))
+    std::cerr << "[VR] Could not start VR. Connect the headset and select an OpenXR runtime; continuing on desktop.\n";
 #ifndef GAME_MODE_RUNTIME
   try {
     LoadRecentScenes();
@@ -195,9 +290,12 @@ Application::Application(int argc, char** argv) {
 #ifdef GAME_MODE_RUNTIME
 
     std::filesystem::path projectPath;
-    if (argc >= 2) {
-        projectPath = argv[1];
-    } else {
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--vr") continue;
+        projectPath = argv[i];
+        break;
+    }
+    if (projectPath.empty()) {
         std::filesystem::path exeDir = std::filesystem::path(argv[0]).parent_path();
         if (exeDir.empty()) exeDir = std::filesystem::current_path();
         std::vector<std::filesystem::path> candidates;
@@ -222,6 +320,12 @@ Application::Application(int argc, char** argv) {
     if (!mr.Ok) throw std::runtime_error("failed to load game module: " + mr.Error);
 
     SceneManager::SetProject(&m_Project);
+    {
+        // Scene assets (meshes, textures) are stored relative to the project root.
+        std::error_code ec;
+        std::filesystem::current_path(m_Project.ProjectRoot, ec);
+        if (ec) std::cerr << "[Runtime] chdir failed: " << ec.message() << "\n";
+    }
     if (!SceneManager::Load(m_Project.StartupSceneName))
         throw std::runtime_error("cannot queue startup scene: " + SceneManager::GetLastError());
     auto pending = SceneManager::ConsumePendingLoad();
@@ -232,6 +336,21 @@ Application::Application(int argc, char** argv) {
         throw std::runtime_error("failed to deserialize startup scene: " + entry->RelativePath);
     m_CurrentScenePath = scenePath;
     m_Scene->OnPhysicsStart();
+#else
+    // "Engine.exe <file.myproject> [--play]" opens a project without the hub.
+    for (int i = 1; i < argc; ++i) {
+        std::filesystem::path arg = argv[i];
+        if (arg.extension() != ".myproject") continue;
+        std::error_code ec;
+        auto file = std::filesystem::absolute(arg, ec);
+        if (!OpenProject(ec ? arg : file)) {
+            std::cerr << "[App] could not open " << arg.string() << ": "
+                      << m_LastProjectError << "\n";
+        } else if (i + 1 < argc && std::string(argv[i + 1]) == "--play") {
+            TogglePlayMode();
+        }
+        break;
+    }
 #endif
 }
 
@@ -369,23 +488,33 @@ void Application::Run() {
     uniform float u_MaterialSSRIntensity;
 
     float SampleCascade(sampler2D sm, mat4 lightSpace, vec3 worldPos,
-                        vec3 normal, vec3 lightDir, float biasMul) {
+                        vec3 normal, vec3 lightDir) {
         vec4 lp = lightSpace * vec4(worldPos, 1.0);
         vec3 p = lp.xyz / lp.w;
         p = p * 0.5 + 0.5;
         if (p.z > 1.0 || p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0)
-            return 0.0;
-        float bias = max(0.005 * (1.0 - dot(normal, lightDir)), 0.0015) *
-                     u_ShadowBiasScale * biasMul;
+            return -1.0;   // outside this cascade
+        vec2 texel = 1.0 / vec2(textureSize(sm, 0));
+        // Compare each PCF tap against the receiver plane at that tap. A single
+        // depth for the whole kernel produces stripes on sloped surfaces.
+        vec3 dx = dFdx(p), dy = dFdy(p);
+        float det = dx.x * dy.y - dx.y * dy.x;
+        vec2 slope = abs(det) > 1e-10
+            ? vec2(dy.y * dx.z - dx.y * dy.z, dx.x * dy.z - dy.x * dx.z) / det
+            : vec2(0.0);
+        slope = clamp(slope, vec2(-10.0), vec2(10.0));
+        float texelSlope = dot(abs(slope), texel);
+        float bias = (0.25 * max(texel.x, texel.y) + min(0.5 * texelSlope, 0.002)) *
+                     u_ShadowBiasScale;
         float shadow = 0.0;
-        vec2 texel = 1.0 / textureSize(sm, 0);
         int radius = clamp(u_ShadowPCFRadius, 0, 4);
         int samples = 0;
         for (int x = -4; x <= 4; ++x)
             for (int y = -4; y <= 4; ++y) {
                 if (abs(x) > radius || abs(y) > radius) continue;
-                float d = texture(sm, p.xy + vec2(x, y) * texel).r;
-                shadow += (p.z - bias > d) ? 1.0 : 0.0;
+                vec2 offset = vec2(x, y) * texel;
+                float d = texture(sm, p.xy + offset).r;
+                shadow += (p.z + dot(slope, offset) - bias > d) ? 1.0 : 0.0;
                 samples++;
             }
         return samples > 0 ? shadow / float(samples) : 0.0;
@@ -393,17 +522,19 @@ void Application::Run() {
 
     float ShadowCalculation(vec3 normal, vec3 lightDir) {
         // Pick cascade by distance from camera (view-space depth).
+        // A fragment outside its cascade's map falls through to the next one.
         float viewDist = length(u_ViewPos - v_FragPos);
+        float shadow = -1.0;
         if (viewDist < u_CsmSplit0)
-            return SampleCascade(u_ShadowMap0, u_LightSpace0, v_FragPos,
-                                 normal, lightDir, 1.0);
-        if (viewDist < u_CsmSplit1)
-            return SampleCascade(u_ShadowMap1, u_LightSpace1, v_FragPos,
-                                 normal, lightDir, 2.5);
-        if (viewDist < u_CsmSplit2)
-            return SampleCascade(u_ShadowMap2, u_LightSpace2, v_FragPos,
-                                 normal, lightDir, 7.0);
-        return 0.0;
+            shadow = SampleCascade(u_ShadowMap0, u_LightSpace0, v_FragPos,
+                                   normal, lightDir);
+        if (shadow < 0.0 && viewDist < u_CsmSplit1)
+            shadow = SampleCascade(u_ShadowMap1, u_LightSpace1, v_FragPos,
+                                   normal, lightDir);
+        if (shadow < 0.0 && viewDist < u_CsmSplit2)
+            shadow = SampleCascade(u_ShadowMap2, u_LightSpace2, v_FragPos,
+                                   normal, lightDir);
+        return max(shadow, 0.0);
     }
 
     uniform vec3 u_SunDirection;
@@ -412,6 +543,9 @@ void Application::Run() {
 
     uniform vec3 u_AmbientColor;
     uniform float u_AmbientIntensity;
+    uniform int u_LinearMaterialColors;
+    uniform float u_MinRoughness;
+    uniform vec2 u_AmbientHemisphere;
 
     #define MAX_POINT_LIGHTS 8
     uniform int u_PointLightCount;
@@ -451,6 +585,7 @@ void Application::Run() {
     uniform sampler2D u_NormalMap;
     uniform int u_HasNormalMap;
     uniform int u_IsUnlit;
+    uniform int u_Translucent;   // see-through pass: Color alpha (and the texture's) is kept
 
     // PBR material parameters.
     uniform float u_Metallic;
@@ -463,7 +598,7 @@ void Application::Run() {
     // Planar reflection (for ground/mirror entities).
     uniform sampler2D u_PlanarReflection;
     uniform int       u_HasPlanarReflection;
-    uniform mat4      u_ViewProjectionPlanar; // main camera VP, for projecting fragment to sample UV
+    uniform mat4      u_ViewProjectionPlanar; // reflected camera VP, for projecting fragment to sample UV
 
     // IBL (optional).
     uniform samplerCube u_IrradianceMap;
@@ -518,8 +653,13 @@ void Application::Run() {
         if (u_HasDiffuseMap > 0) texColor *= texture(u_DiffuseMap, v_TexCoord * u_TilingFactor);
         vec3 albedo = (u_Color.rgb * texColor.rgb);
 
+        if (u_LinearMaterialColors > 0) {
+            vec3 bounded = clamp(albedo, 0.0, 1.0);
+            albedo = mix(bounded / 12.92, pow((bounded + 0.055) / 1.055, vec3(2.4)),
+                         step(vec3(0.04045), bounded)) + max(albedo - 1.0, 0.0);
+        }
         float metallic  = clamp(u_Metallic, 0.0, 1.0);
-        float roughness = clamp(u_Roughness, 0.04, 1.0);
+        float roughness = clamp(u_Roughness, u_MinRoughness, 1.0);
 
         vec3 V = normalize(u_ViewPos - v_FragPos);
         vec3 F0 = mix(vec3(0.04), albedo, metallic);
@@ -663,8 +803,8 @@ void Application::Run() {
             // Analytical pseudo-IBL: hemisphere approximation.
             // Sky (bluish toward up), ground (warm/dark toward down) — physically plausible
             // ambient term that varies with surface normal.
-            vec3 skyColor    = u_AmbientColor * u_AmbientIntensity * 1.6;
-            vec3 groundColor = u_AmbientColor * u_AmbientIntensity * 0.35;
+            vec3 skyColor    = u_AmbientColor * u_AmbientIntensity * u_AmbientHemisphere.x;
+            vec3 groundColor = u_AmbientColor * u_AmbientIntensity * u_AmbientHemisphere.y;
             float hemi = dot(N, vec3(0.0, 1.0, 0.0)) * 0.5 + 0.5;
             vec3 irradiance = mix(groundColor, skyColor, hemi);
 
@@ -690,17 +830,20 @@ void Application::Run() {
             vec2 ruv = (clip.xy / clip.w) * 0.5 + 0.5;
             if (ruv.x > 0.0 && ruv.x < 1.0 && ruv.y > 0.0 && ruv.y < 1.0) {
                 vec3 refl = texture(u_PlanarReflection, ruv).rgb;
-                // Blend weight from Fresnel + user-tunable strength.
+                // Blend weight from Fresnel + user-tunable strength (the
+                // material's SSR intensity, when set, scales the mirror too).
                 float NdotV = max(dot(N, V), 0.0);
                 float fresnel = pow(1.0 - NdotV, 4.0);
-                float w = mix(0.4, 0.9, fresnel);
+                float strength = u_MaterialSSRIntensity > 0.0 ? min(u_MaterialSSRIntensity, 1.0) : 1.0;
+                float w = mix(mix(0.4, 0.9, fresnel), 0.98, metallic) * strength;
                 result = mix(result, refl, w);
             }
         }
 
         // Force opaque output — scene has GL_BLEND enabled for other passes,
         // so we shouldn't leak partial alpha from materials into opaque meshes.
-        color = vec4(result, 1.0);
+        // Only the see-through pass (glass) keeps the material's alpha.
+        color = vec4(result, u_Translucent > 0 ? u_Color.a * texColor.a : 1.0);
 
         // G-buffer for SSR: view-space normal + reflectivity factor.
         // Rough surfaces still get a small SSR contribution so the toggle remains visible,
@@ -720,6 +863,20 @@ void Application::Run() {
   std::shared_ptr<Shader> shader;
 
   shader.reset(new Shader(vertexSrc, fragmentSrc));
+  // Set every sampler before the first draw, even when its feature is disabled.
+  // Leaving cubemaps at unit 0 aliases sampler2D and invalidates draws on Mesa.
+  shader->Bind();
+  shader->UploadUniformInt("u_Texture", 0);
+  shader->UploadUniformInt("u_DiffuseMap", 1);
+  shader->UploadUniformInt("u_NormalMap", 2);
+  shader->UploadUniformInt("u_ShadowMap0", 3);
+  shader->UploadUniformInt("u_IrradianceMap", 4);
+  shader->UploadUniformInt("u_PrefilterMap", 5);
+  shader->UploadUniformInt("u_BRDFLUT", 6);
+  shader->UploadUniformInt("u_PlanarReflection", 7);
+  shader->UploadUniformInt("u_ShadowMap1", 10);
+  shader->UploadUniformInt("u_ShadowMap2", 11);
+  shader->Unbind();
 
   FramebufferSpecification fbSpec;
   fbSpec.Width = 1280;
@@ -752,11 +909,12 @@ void Application::Run() {
   ldrSpec.Samples = 1;
   ldrSpec.Format = FramebufferFormat::RGBA8;
   ldrSpec.ExtraColorAttachments.clear();
-  ldrSpec.HasDepth = false;
+  ldrSpec.HasDepth = true; // World-space UI shares the resolved scene depth.
   std::shared_ptr<Framebuffer> ldrFB;
   ldrFB.reset(Framebuffer::Create(ldrSpec));
 
   std::shared_ptr<Framebuffer> prevFrameFB;
+  ldrSpec.HasDepth = false;
   prevFrameFB.reset(Framebuffer::Create(ldrSpec));
 
   FramebufferSpecification ssrSpec;
@@ -802,6 +960,24 @@ void Application::Run() {
 
   const float csmSplitDist[3]  = { 12.0f, 35.0f, 120.0f };
 
+  auto resizeRenderTargets = [&](uint32_t width, uint32_t height) {
+    if (width == 0 || height == 0 ||
+        (width == fbSpec.Width && height == fbSpec.Height))
+      return;
+    fbSpec.Width = width;
+    fbSpec.Height = height;
+    framebuffer->Resize(width, height);
+    resolveFB->Resize(width, height);
+    ldrFB->Resize(width, height);
+    prevFrameFB->Resize(width, height);
+    ssaoFB->Resize(width / 2, height / 2);
+    ssaoBlurFB->Resize(width / 2, height / 2);
+    ssrFB->Resize(width / 2, height / 2);
+    planarFB->Resize(std::min(width / 2, 512u), std::min(height / 2, 512u));
+    bloomA->Resize(width / 2, height / 2);
+    bloomB->Resize(width / 2, height / 2);
+  };
+
   unsigned int fsQuadVAO = 0;
   glGenVertexArrays(1, &fsQuadVAO);
 
@@ -829,6 +1005,8 @@ void Application::Run() {
     uniform int   u_UseSSAO;
     uniform int   u_UseSSR;
     uniform int   u_DebugView;
+    uniform int   u_SpatialAA;
+    uniform int   u_CleanStereo;
     uniform float u_BloomStrength;
     uniform float u_Exposure;
     uniform float u_Vignette;
@@ -862,6 +1040,13 @@ void Application::Run() {
     uniform vec3  u_Gamma;       // midtones
     uniform vec3  u_Gain;        // highlights
 
+    // --- Retro look ---
+    uniform float u_PixelHeight;     // virtual vertical resolution, 0 = native
+    uniform float u_ColorLevels;     // posterize levels per channel, 0 = off
+    uniform float u_DitherStrength;  // 0-1 ordered dither
+    uniform float u_OutlineStrength; // 0-1 depth-edge darkening
+    uniform int   u_FogAffectsSky;   // 0 = fog only touches geometry
+
     // Camera projection for depth linearization.
     uniform float u_Near;
     uniform float u_Far;
@@ -886,6 +1071,9 @@ void Application::Run() {
         vec3 warm = vec3(1.0, 0.95, 0.85);
         vec3 cool = vec3(0.85, 0.95, 1.1);
         vec3 tempCol = mix(cool, warm, clamp(u_Temperature * 0.5 + 0.5, 0.0, 1.0));
+        if (u_CleanStereo > 0)
+            tempCol = u_Temperature >= 0.0 ? mix(vec3(1.0), warm, clamp(u_Temperature, 0.0, 1.0))
+                                           : mix(vec3(1.0), cool, clamp(-u_Temperature, 0.0, 1.0));
         c *= tempCol;
         c.g *= 1.0 + u_Tint * 0.15;
         c.r *= 1.0 - u_Tint * 0.05;
@@ -947,7 +1135,38 @@ void Application::Run() {
         return vec3(1.0, 0.92, 0.75) * acc * falloff;
     }
 
+    // Virtual low-res pixel grid: every fragment inside one "big pixel" samples
+    // the same UV, so the whole post chain comes out pixelated.
+    vec2 g_PixUV;
+    vec2 g_PixGrid;
+    vec2 g_PixTexel;
+    void SetupPixelGrid() {
+        vec2 res = vec2(textureSize(u_Scene, 0));
+        g_PixUV = v_UV;
+        g_PixGrid = floor(v_UV * res);
+        g_PixTexel = 1.0 / res;
+        if (u_PixelHeight > 0.5 && u_PixelHeight < res.y) {
+            vec2 lowRes = max(floor(vec2(u_PixelHeight * res.x / res.y, u_PixelHeight) + 0.5),
+                              vec2(1.0));
+            g_PixGrid = floor(v_UV * lowRes);
+            g_PixUV = (g_PixGrid + 0.5) / lowRes;
+            g_PixTexel = 1.0 / lowRes;
+        }
+    }
+
+    float Bayer4(vec2 p) {
+        const float m[16] = float[](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,
+                                    3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+        int idx = int(mod(p.x, 4.0)) + int(mod(p.y, 4.0)) * 4;
+        return (m[idx] + 0.5) / 16.0;
+    }
+
+    // From here on every v_UV is the pixel-grid UV.
+    #define v_UV g_PixUV
+
     void main() {
+        SetupPixelGrid();
+
         // Chromatic aberration (radial).
         vec2 toCenter = v_UV - vec2(0.5);
         float caOffset = u_ChromaticAberration * 0.01;
@@ -958,6 +1177,22 @@ void Application::Run() {
             hdr.b = texture(u_Scene, v_UV + toCenter * caOffset).b;
         } else {
             hdr = texture(u_Scene, v_UV).rgb;
+        }
+        // Spatial edge smoothing has no history shared between the eyes.
+        if (u_SpatialAA > 0) {
+            vec2 pixel = 1.0 / vec2(textureSize(u_Scene, 0));
+            vec3 north = texture(u_Scene, v_UV + vec2(0,pixel.y)).rgb;
+            vec3 south = texture(u_Scene, v_UV - vec2(0,pixel.y)).rgb;
+            vec3 east = texture(u_Scene, v_UV + vec2(pixel.x,0)).rgb;
+            vec3 west = texture(u_Scene, v_UV - vec2(pixel.x,0)).rgb;
+            vec3 weights = vec3(.299,.587,.114);
+            float n=dot(north,weights),s=dot(south,weights),e=dot(east,weights),w=dot(west,weights),c=dot(hdr,weights);
+            float low=min(c,min(min(n,s),min(e,w))), high=max(c,max(max(n,s),max(e,w)));
+            float contrast=high-low;
+            if(contrast>max(.04,high*.12)) {
+                float blend=clamp(abs((n+s+e+w)*.25-c)/max(contrast,.001),0.0,1.0)*.45;
+                hdr=mix(hdr,(north+south+east+west)*.25,blend);
+            }
         }
         vec3 bloom = texture(u_Bloom, v_UV).rgb;
 
@@ -1019,8 +1254,21 @@ void Application::Run() {
             }
         }
 
+        // --- Outline: darken the far side of depth discontinuities ---
+        if (u_OutlineStrength > 0.001) {
+            float dC = LinearizeDepth(texture(u_Depth, v_UV).r);
+            float dN = dC;
+            dN = min(dN, LinearizeDepth(texture(u_Depth, v_UV + vec2(g_PixTexel.x, 0.0)).r));
+            dN = min(dN, LinearizeDepth(texture(u_Depth, v_UV - vec2(g_PixTexel.x, 0.0)).r));
+            dN = min(dN, LinearizeDepth(texture(u_Depth, v_UV + vec2(0.0, g_PixTexel.y)).r));
+            dN = min(dN, LinearizeDepth(texture(u_Depth, v_UV - vec2(0.0, g_PixTexel.y)).r));
+            float edge = smoothstep(0.06, 0.14, (dC - dN) / max(dC, 0.001));
+            hdr *= 1.0 - edge * u_OutlineStrength;
+        }
+
         // --- Volumetric exponential-squared fog (smooth falloff, no hard edge) ---
-        if (u_FogDensity > 0.0) {
+        if (u_FogDensity > 0.0 &&
+            (u_FogAffectsSky > 0 || texture(u_Depth, v_UV).r < 0.99999)) {
             float linearD = LinearizeDepth(texture(u_Depth, v_UV).r);
             float x = max(linearD - u_FogStart, 0.0) * u_FogDensity;
             float fogFactor = 1.0 - exp(-x * x);
@@ -1059,6 +1307,13 @@ void Application::Run() {
         if (u_FilmGrain > 0.0) {
             float n = Rand(v_UV * (1.0 + u_Time * 17.0)) - 0.5;
             mapped += n * u_FilmGrain * 0.15;
+        }
+
+        // Posterize to a limited palette, with ordered dithering between steps.
+        if (u_ColorLevels > 1.5) {
+            float steps = u_ColorLevels - 1.0;
+            float threshold = (Bayer4(g_PixGrid) - 0.5) * u_DitherStrength;
+            mapped = floor(clamp(mapped, 0.0, 1.0) * steps + 0.5 + threshold) / steps;
         }
 
         // Motion blur — camera reprojection (real, not ghosting trick).
@@ -1154,36 +1409,28 @@ void Application::Run() {
         return view.xyz / view.w;
     }
 
-    float rand(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }
+    uniform sampler2D u_Normals;
+    uniform mat3 u_ViewRotation;
 
     void main() {
         float centerDepth = texture(u_Depth, v_UV).r;
-        if (centerDepth >= 0.9999) {
-            o_Color = vec4(1.0);
-            return;
-        }
-
+        if (centerDepth >= 0.99999) { o_Color = vec4(1.0); return; }
         vec3 p = ViewPosFromDepth(v_UV);
-        // Reconstruct view-space normal from depth derivatives.
-        vec3 dx = dFdx(p);
-        vec3 dy = dFdy(p);
-        vec3 n = normalize(cross(dx, dy));
+        vec3 n = texture(u_Normals, v_UV).xyz;
+        if (dot(n,n) < 0.25) { o_Color = vec4(1.0); return; }
+        n = normalize(transpose(u_ViewRotation) * n);
+        vec3 reference = abs(n.y) < 0.95 ? vec3(0,1,0) : vec3(1,0,0);
+        vec3 t = normalize(cross(reference,n));
+        vec3 b = cross(n,t);
+        mat3 tbn = u_ViewRotation * mat3(t,b,n);
 
-        // Build tangent basis.
-        vec3 rvec = normalize(vec3(rand(v_UV * u_NoiseScale) * 2.0 - 1.0,
-                                   rand(v_UV * u_NoiseScale + 7.0) * 2.0 - 1.0,
-                                   0.0));
-        vec3 t = normalize(rvec - n * dot(rvec, n));
-        vec3 b = cross(n, t);
-        mat3 tbn = mat3(t, b, n);
-
-        // 16-sample hemisphere.
-        const int KERNEL = 16;
+        // Fixed world-space samples avoid screen noise swimming with the head.
+        const int KERNEL = 12;
         float occlusion = 0.0;
         for (int i = 0; i < KERNEL; ++i) {
-            float angle = float(i) * 6.2831853 / float(KERNEL);
+            float angle = float(i) * 2.39996323;
             float s = 0.2 + 0.8 * fract(float(i) * 0.6180339);
-            vec3 sample = vec3(cos(angle) * s, sin(angle) * s, s);
+            vec3 sample = normalize(vec3(cos(angle), sin(angle), 0.6)) * s;
             vec3 samplePos = p + tbn * sample * u_Radius;
 
             vec4 sp = u_Projection * vec4(samplePos, 1.0);
@@ -1198,7 +1445,7 @@ void Application::Run() {
             if (sampleSceneDepth >= 0.9999)
                 continue;
             float sampleDepth = ViewPosFromDepth(sp.xy).z;
-            float rangeCheck = smoothstep(0.0, 1.0, u_Radius / abs(p.z - sampleDepth));
+            float rangeCheck = smoothstep(0.0, 1.0, u_Radius / max(abs(p.z - sampleDepth), 0.0001));
             occlusion += (sampleDepth >= samplePos.z + u_Bias ? 1.0 : 0.0) * rangeCheck;
         }
         occlusion = 1.0 - (occlusion / float(KERNEL)) * u_Strength;
@@ -1212,13 +1459,21 @@ void Application::Run() {
     in vec2 v_UV;
     out vec4 o_Color;
     uniform sampler2D u_SSAO;
+    uniform sampler2D u_Depth;
+    uniform mat4 u_InvProjection;
+    float ViewDepth(vec2 uv) {
+        vec4 p = u_InvProjection * vec4(uv*2.0-1.0, texture(u_Depth,uv).r*2.0-1.0,1.0);
+        return p.z/p.w;
+    }
     void main() {
         vec2 texel = 1.0 / vec2(textureSize(u_SSAO, 0));
-        float result = 0.0;
-        for (int x = -2; x < 2; ++x)
-            for (int y = -2; y < 2; ++y)
-                result += texture(u_SSAO, v_UV + vec2(x, y) * texel).r;
-        o_Color = vec4(vec3(result / 16.0), 1.0);
+        float center = ViewDepth(v_UV), result = 0.0, total = 0.0;
+        for (int x=-1;x<=1;++x) for (int y=-1;y<=1;++y) {
+            vec2 uv=clamp(v_UV+vec2(x,y)*texel,vec2(0),vec2(1));
+            float weight=exp(-abs(ViewDepth(uv)-center)*40.0) * (x==0?2.0:1.0) * (y==0?2.0:1.0);
+            result+=texture(u_SSAO,uv).r*weight; total+=weight;
+        }
+        o_Color=vec4(vec3(result/max(total,0.0001)),1.0);
     }
   )";
   std::shared_ptr<Shader> ssaoBlurShader(new Shader(postVSrc, ssaoBlurFSrc));
@@ -1367,13 +1622,16 @@ void Application::Run() {
     #version 330 core
     layout(location = 0) in vec3 a_Position;
     layout(location = 1) in vec3 a_Normal;
+    layout(location = 2) in vec2 a_TexCoord;
     uniform mat4 u_ViewProjection;
     uniform mat4 u_Transform;
     out vec3 v_WorldPos;
     out vec3 v_Normal;
+    out vec2 v_TexCoord;
     void main() {
         v_WorldPos = vec3(u_Transform * vec4(a_Position, 1.0));
         v_Normal = mat3(transpose(inverse(u_Transform))) * a_Normal;
+        v_TexCoord = a_TexCoord;
         gl_Position = u_ViewProjection * vec4(v_WorldPos, 1.0);
     }
   )";
@@ -1381,20 +1639,45 @@ void Application::Run() {
     #version 330 core
     in vec3 v_WorldPos;
     in vec3 v_Normal;
+    in vec2 v_TexCoord;
     out vec4 o_Color;
     uniform vec4  u_Albedo;
+    uniform sampler2D u_DiffuseMap;
+    uniform int u_HasDiffuseMap;
+    uniform int u_LinearMaterialColors;
+    uniform vec4 u_ClipPlane;
+    uniform int u_PointCount;
+    uniform vec4 u_PointPositionRadius[8];
+    uniform vec3 u_PointColor[8];
     uniform vec3  u_SunDir;
     uniform vec3  u_SunColor;
     uniform float u_SunIntensity;
     uniform vec3  u_AmbientColor;
     uniform float u_AmbientIntensity;
     void main() {
+        // The wall behind a mirror must not hide the reflected room.
+        if (dot(u_ClipPlane, vec4(v_WorldPos, 1.0)) < 0.001) discard;
+        vec4 albedo = u_Albedo;
+        if (u_HasDiffuseMap > 0) albedo *= texture(u_DiffuseMap, v_TexCoord);
+        if (albedo.a < 0.5) discard;
+        if (u_LinearMaterialColors > 0) {
+            vec3 bounded = clamp(albedo.rgb,0.0,1.0);
+            albedo.rgb = mix(bounded/12.92,pow((bounded+.055)/1.055,vec3(2.4)),
+                             step(vec3(.04045),bounded)) + max(albedo.rgb-1.0,0.0);
+        }
         vec3 N = normalize(v_Normal);
         vec3 L = normalize(-u_SunDir);
         float NdotL = max(dot(N, L), 0.0);
         vec3 direct = u_SunColor * u_SunIntensity * NdotL;
         vec3 ambient = u_AmbientColor * u_AmbientIntensity;
-        o_Color = vec4(u_Albedo.rgb * (ambient + direct), 1.0);
+        for (int i = 0; i < u_PointCount; ++i) {
+            vec3 toLight = u_PointPositionRadius[i].xyz - v_WorldPos;
+            float distance = length(toLight);
+            float attenuation = max(1.0 - distance / max(u_PointPositionRadius[i].w, 0.001), 0.0);
+            direct += u_PointColor[i] * attenuation * attenuation *
+                      max(dot(N, toLight / max(distance, 0.001)), 0.0);
+        }
+        o_Color = vec4(albedo.rgb * (ambient + direct), 1.0);
     }
   )";
   std::shared_ptr<Shader> planarShader(new Shader(planarVSrc, planarFSrc));
@@ -1696,16 +1979,20 @@ void Application::Run() {
 #include "../Scene/SceneSerializer.h"
 
 #ifdef GAME_MODE_RUNTIME
-  m_Scene->Clear();
-  SceneSerializer serializer(m_Scene);
-  if (serializer.Deserialize("Default.scene")) {
-    std::cout << "Loaded Default.scene successfully" << std::endl;
-    std::cout << "[Runtime] Entity count: " << m_Scene->GetEntities().size()
-              << std::endl;
-    m_Scene->OnPhysicsStart();
-  } else {
-    std::cout << "Could not load Default.scene, using manual scene setup..."
-              << std::endl;
+  // The project's startup scene was already loaded by the constructor; only
+  // fall back to a loose Default.scene when there is no project.
+  if (m_Project.Name.empty()) {
+    m_Scene->Clear();
+    SceneSerializer serializer(m_Scene);
+    if (serializer.Deserialize("Default.scene")) {
+      std::cout << "Loaded Default.scene successfully" << std::endl;
+      std::cout << "[Runtime] Entity count: " << m_Scene->GetEntities().size()
+                << std::endl;
+      m_Scene->OnPhysicsStart();
+    } else {
+      std::cout << "Could not load Default.scene, using manual scene setup..."
+                << std::endl;
+    }
   }
 #endif
   const char *skyboxVertexShaderSource = R"(
@@ -2145,7 +2432,8 @@ void Application::Run() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
       if (m_AppState == AppState::Runtime) {
-        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE) {
+        if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE &&
+            !event.key.repeat && !m_GameHandlesEscape) {
           SetMouseLocked(!m_MouseLocked);
         }
       }
@@ -2164,7 +2452,7 @@ void Application::Run() {
 #ifndef GAME_MODE_RUNTIME
 
       if (m_AppState == AppState::Runtime && event.type == SDL_KEYDOWN &&
-          event.key.keysym.sym == SDLK_ESCAPE) {
+          event.key.keysym.sym == SDLK_ESCAPE && !event.key.repeat && !m_GameHandlesEscape) {
         TogglePlayMode();
       }
 
@@ -2205,6 +2493,9 @@ void Application::Run() {
       if (event.type == SDL_QUIT)
         m_Running = false;
 
+      if (event.type == SDL_MOUSEWHEEL)
+        Input::AddMouseScroll((float)event.wheel.y);
+
       if (event.type == SDL_WINDOWEVENT) {
         if (event.window.event == SDL_WINDOWEVENT_CLOSE &&
             event.window.windowID ==
@@ -2219,6 +2510,15 @@ void Application::Run() {
 
     Input::Update();
 
+    // Tracking/actions must be sampled before gameplay, for this predicted frame.
+    bool vrActive = m_VRSystem.IsAvailable() && m_AppState == AppState::Runtime;
+    bool xrFrameValid = vrActive && m_VRSystem.BeginFrame();
+    if (vrActive) {
+      int width = 0, height = 0;
+      SDL_GetWindowSize(m_Window->GetNativeWindow(), &width, &height);
+      m_GameViewRect = {0, 0, (float)VRSystem::kUIWidth, (float)VRSystem::kUIHeight};
+    }
+
     float time = (float)SDL_GetTicks() / 1000.0f;
     float ts = time - m_LastFrameTime;
     m_LastFrameTime = time;
@@ -2230,6 +2530,7 @@ void Application::Run() {
       if (m_AutosaveTimer >= m_AutosaveInterval) {
         m_AutosaveTimer = 0.0f;
         SceneSerializer(m_Scene).Serialize(m_CurrentScenePath);
+        MarkSceneSynced();
         std::cout << "[Autosave] saved " << m_CurrentScenePath << "\n";
       }
     } else {
@@ -2279,14 +2580,59 @@ void Application::Run() {
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
-    if (m_AppState == AppState::Runtime && m_MouseLocked) {
+    if (vrActive && m_VRSystem.HasTracking()) {
+      ImGui::GetIO().DisplaySize = ImVec2((float)VRSystem::kUIWidth, (float)VRSystem::kUIHeight);
+      ImGui::GetIO().DisplayFramebufferScale = ImVec2(1,1);
+    }
+    if (m_AppState == AppState::Runtime && m_MouseLocked && !vrActive) {
       ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouse;
       ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     } else {
       ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouse;
       ImGui::GetIO().ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
     }
+    static bool vrMouseDown = false;
+    static bool vrNavigation = false;
+    if (vrActive) {
+      auto& io = ImGui::GetIO();
+      m_VRSystem.SetUIAspect(io.DisplaySize.x / std::max(io.DisplaySize.y, 1.0f));
+      if (m_VRSystem.HasTracking() && m_VRSystem.IsFocused() &&
+          (m_VRSystem.IsUIInteractive() || m_VRSystem.IsCinemaMode())) {
+        glm::vec2 uv;
+        bool hit = m_VRSystem.GetUIPointer(uv);
+        const auto& hand = m_VRSystem.GetHandState(m_VRSystem.GetHandState(1).Active ? 1 : 0);
+        const auto& left = m_VRSystem.GetHandState(0);
+        if (glm::length(left.Thumbstick) > .6f) vrNavigation = true;
+        if (hand.Trigger > .55f) vrNavigation = false;
+        io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+        io.AddKeyEvent(ImGuiKey_GamepadDpadUp, left.Thumbstick.y > .6f);
+        io.AddKeyEvent(ImGuiKey_GamepadDpadDown, left.Thumbstick.y < -.6f);
+        io.AddKeyEvent(ImGuiKey_GamepadDpadLeft, left.Thumbstick.x < -.6f);
+        io.AddKeyEvent(ImGuiKey_GamepadDpadRight, left.Thumbstick.x > .6f);
+        io.AddKeyEvent(ImGuiKey_GamepadFaceDown, vrNavigation && hand.PrimaryBtn);
+        io.AddMousePosEvent(hit && !vrNavigation ? uv.x * io.DisplaySize.x : -1000.0f, hit && !vrNavigation ? uv.y * io.DisplaySize.y : -1000.0f);
+        vrMouseDown = !vrNavigation && hit && hand.Active && (hand.Trigger > 0.55f || hand.PrimaryBtn);
+        io.AddMouseButtonEvent(0, vrMouseDown);
+      } else if (vrMouseDown) {
+        io.AddMouseButtonEvent(0, false);
+        vrMouseDown = false;
+      }
+      if (!m_VRSystem.IsUIInteractive() || !m_VRSystem.IsFocused()) {
+        for (auto key : {ImGuiKey_GamepadDpadUp, ImGuiKey_GamepadDpadDown, ImGuiKey_GamepadDpadLeft,
+                        ImGuiKey_GamepadDpadRight, ImGuiKey_GamepadFaceDown}) io.AddKeyEvent(key, false);
+        vrNavigation = false;
+      }
+      m_Window->SetVSync(false); // OpenXR paces the frame, independently of the monitor.
+    }
     ImGui::NewFrame();
+    if (m_AppState == AppState::Runtime) {
+      if (xrFrameValid) m_VRSystem.RefreshTracking();
+      m_Scene->OnLateUpdate(ts);
+      if (vrActive) {
+        m_VRSystem.BeginWorldUIFrame();
+        if (xrFrameValid && !m_VRSystem.IsCinemaMode()) m_Scene->OnWorldUIRender();
+      }
+    }
 
 #ifndef GAME_MODE_RUNTIME
     ImGuizmo::BeginFrame();
@@ -2295,6 +2641,7 @@ void Application::Run() {
         Input::IsKeyPressed(SDL_SCANCODE_S)) {
       if (!m_CurrentScenePath.empty()) {
         SceneSerializer(m_Scene).Serialize(m_CurrentScenePath);
+        MarkSceneSynced();
       } else if (GetProject()) {
         std::string file = FileDialogs::SaveFile(".scene\0*.scene\0");
         if (!file.empty()) {
@@ -2303,6 +2650,7 @@ void Application::Run() {
           SceneSerializer(m_Scene).Serialize(p.string());
           AddOrRegisterScene(p);
           m_CurrentScenePath = p.string();
+          MarkSceneSynced();
         }
       }
     }
@@ -2341,6 +2689,7 @@ void Application::Run() {
           if (ImGui::MenuItem("Save Scene", "Ctrl+S", false, GetProject() != nullptr)) {
             if (!m_CurrentScenePath.empty()) {
               SceneSerializer(m_Scene).Serialize(m_CurrentScenePath);
+              MarkSceneSynced();
             } else {
               auto defaultDir = (m_Project.ProjectRoot / "Assets" / "Scenes").string();
               std::filesystem::create_directories(defaultDir);
@@ -2351,6 +2700,7 @@ void Application::Run() {
                 SceneSerializer(m_Scene).Serialize(p.string());
                 AddOrRegisterScene(p);
                 m_CurrentScenePath = p.string();
+                MarkSceneSynced();
               }
             }
           }
@@ -2364,6 +2714,7 @@ void Application::Run() {
               SceneSerializer(m_Scene).Serialize(p.string());
               AddOrRegisterScene(p);
               m_CurrentScenePath = p.string();
+              MarkSceneSynced();
             }
           }
           ImGui::Separator();
@@ -2393,6 +2744,7 @@ void Application::Run() {
                 m_Scene->Clear();
                 if (SceneSerializer(m_Scene).Deserialize(full)) {
                   m_CurrentScenePath = full;
+                  MarkSceneSynced();
                 }
               }
             }
@@ -2502,6 +2854,30 @@ void Application::Run() {
         ImGui::EndPopup();
       }
 
+      if (m_ShowScriptBuildError) {
+        ImGui::OpenPopup("Scripts did not compile");
+        m_ShowScriptBuildError = false;
+      }
+      if (ImGui::BeginPopupModal("Scripts did not compile", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f),
+                           "The game scripts failed to compile. The previous Game.dll is still loaded,");
+        ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.4f, 1.0f),
+                           "so Play would run the OLD version of the game.");
+        ImGui::InputTextMultiline("##scriptlog", m_ScriptBuildLog.data(), m_ScriptBuildLog.size() + 1,
+                                  ImVec2(900, 320), ImGuiInputTextFlags_ReadOnly);
+        if (ImGui::Button("Copy log", ImVec2(120, 0)))
+          ImGui::SetClipboardText(m_ScriptBuildLog.c_str());
+        ImGui::SameLine();
+        if (ImGui::Button("Retry (Reload Scripts)", ImVec2(200, 0))) {
+          ImGui::CloseCurrentPopup();
+          ReloadScripts();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(120, 0)))
+          ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+      }
+
       if (m_OpenNewScenePopup) {
         ImGui::OpenPopup("New Scene");
         m_OpenNewScenePopup = false;
@@ -2537,6 +2913,7 @@ void Application::Run() {
           SceneSerializer(m_Scene).Serialize(p.string());
           AddOrRegisterScene(p);
           m_CurrentScenePath = p.string();
+          MarkSceneSynced();
           ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -2662,6 +3039,71 @@ void Application::Run() {
     ImGui::End();
 #endif
 
+    {
+      auto writePost = [&](const RenderSettings &from) {
+        g_Exposure = from.Exposure;
+        g_AutoExposure = from.AutoExposure;
+        g_BloomStrength = from.BloomStrength;
+        g_BloomThreshold = from.BloomThreshold;
+        g_Vignette = from.Vignette;
+        g_FilmGrain = from.FilmGrain;
+        g_ChromaticAberration = from.ChromaticAberration;
+        g_FogDensity = from.FogDensity;
+        g_FogColor = from.FogColor;
+        g_FogStart = from.FogStart;
+        g_Contrast = from.Contrast;
+        g_Saturation = from.Saturation;
+        g_Temperature = from.Temperature;
+        g_SSAOEnabled = from.SSAO;
+        g_SSREnabled = from.SSR;
+        g_SkyTop = from.SkyTop;
+        g_SkyHorizon = from.SkyHorizon;
+        g_GroundCol = from.SkyGround;
+      };
+      auto readPost = [&](RenderSettings &to) {
+        to.Exposure = g_Exposure;
+        to.AutoExposure = g_AutoExposure;
+        to.BloomStrength = g_BloomStrength;
+        to.BloomThreshold = g_BloomThreshold;
+        to.Vignette = g_Vignette;
+        to.FilmGrain = g_FilmGrain;
+        to.ChromaticAberration = g_ChromaticAberration;
+        to.FogDensity = g_FogDensity;
+        to.FogColor = g_FogColor;
+        to.FogStart = g_FogStart;
+        to.Contrast = g_Contrast;
+        to.Saturation = g_Saturation;
+        to.Temperature = g_Temperature;
+        to.SSAO = g_SSAOEnabled;
+        to.SSR = g_SSREnabled;
+        to.SkyTop = g_SkyTop;
+        to.SkyHorizon = g_SkyHorizon;
+        to.SkyGround = g_GroundCol;
+      };
+
+      // A script's look is applied on top of the editor's values, which come
+      // back when Play stops.
+      static RenderSettings s_EditorPost;
+      static bool s_HasEditorPost = false;
+      RenderSettings &rs = RenderSettings::Get();
+      if (rs.ApplyPost) {
+        rs.ApplyPost = false;
+        if (!s_HasEditorPost) {
+          readPost(s_EditorPost);
+          s_HasEditorPost = true;
+        }
+        writePost(rs);
+      }
+      if (rs.RestorePost) {
+        rs.RestorePost = false;
+        if (s_HasEditorPost) {
+          writePost(s_EditorPost);
+          s_HasEditorPost = false;
+        }
+      }
+    }
+
+    Entity* renderCamera = m_Scene->GetPrimaryCameraEntity();
     glm::mat4 csmLightSpace[3] = { glm::mat4(1.0f), glm::mat4(1.0f), glm::mat4(1.0f) };
     glm::mat4 lightSpaceMatrix(1.0f);
     bool shadowsActive = false;
@@ -2685,9 +3127,15 @@ void Application::Run() {
       if (shadowsActive) {
 
         glm::vec3 focus(0.0f);
+        glm::vec3 focusForward(0.0f);
         if (m_AppState == AppState::Runtime) {
-          if (auto *pc = m_Scene->GetPrimaryCameraEntity())
-            focus = glm::vec3(m_Scene->GetWorldTransform(*pc)[3]);
+          if (auto *pc = renderCamera) {
+            glm::mat4 camWorld = m_Scene->GetWorldTransform(*pc);
+            focus = glm::vec3(camWorld[3]);
+            // Push each cascade ahead of the camera so it covers what is on
+            // screen instead of being centred on the eye.
+            focusForward = -glm::normalize(glm::vec3(camWorld[2]));
+          }
         } else {
           focus = m_Camera.GetPosition();
         }
@@ -2699,7 +3147,7 @@ void Application::Run() {
           float halfSize = csmHalfSize[c];
 
           float texelSize = (2.0f * halfSize) / 2048.0f;
-          glm::vec3 snapped = focus;
+          glm::vec3 snapped = focus + focusForward * (halfSize * 0.75f);
           snapped.x = std::floor(snapped.x / texelSize) * texelSize;
           snapped.z = std::floor(snapped.z / texelSize) * texelSize;
 
@@ -2717,6 +3165,7 @@ void Application::Run() {
             if (!e.HasMeshRenderer || !e.MeshRenderer.Mesh) continue;
             if (!e.MeshRenderer.CastsShadow) continue;
             glm::mat4 model = m_Scene->GetWorldTransform(e);
+            if (!BoundsVisible(csmLightSpace[c] * model, e.MeshRenderer.Mesh->GetAABBMin(), e.MeshRenderer.Mesh->GetAABBMax())) continue;
             depthShader->UploadUniformMat4("u_Transform", model);
             e.MeshRenderer.Mesh->GetVertexArray()->Bind();
             glDrawElements(GL_TRIANGLES,
@@ -2732,13 +3181,10 @@ void Application::Run() {
       }
     }
 
-    bool vrActive = m_VRSystem.IsActive() && m_AppState == AppState::Runtime;
-    bool vrFrameValid = false;
-    int  vrEyeCount = 1;
-    if (vrActive) {
-      vrFrameValid = m_VRSystem.BeginFrame();
-      vrEyeCount   = vrFrameValid ? 2 : 1;
-    }
+    bool vrFrameValid = xrFrameValid && !m_VRSystem.IsCinemaMode();
+    int vrEyeCount = vrFrameValid ? 2 : 1;
+    const auto& stereoLook = RenderSettings::Get().VR;
+    const bool cleanStereo = vrFrameValid && stereoLook.Enabled;
 
     glm::mat4 viewProjection(1.0f);
     glm::mat4 viewMatrix(1.0f);
@@ -2746,23 +3192,32 @@ void Application::Run() {
 
     for (int vrEye = 0; vrEye < vrEyeCount; vrEye++) {
 
-#ifndef GAME_MODE_RUNTIME
-    framebuffer->Bind();
-#else
     if (vrActive && vrFrameValid) {
-      m_VRSystem.BindEyeFramebuffer(vrEye);
+      framebuffer->SetSamples(m_VRSystem.GetQuality() == 0 ? 1 : m_VRSystem.GetQuality() == 1 ? 2 : 4);
+      float scale = m_VRSystem.GetRenderScale();
+      resizeRenderTargets((uint32_t)(m_VRSystem.GetEyeWidth()*scale), (uint32_t)(m_VRSystem.GetEyeHeight()*scale));
+      framebuffer->Bind();
     } else {
+      framebuffer->SetSamples(4);
+#ifndef GAME_MODE_RUNTIME
+      framebuffer->Bind();
+#else
+      // The standalone runtime draws into the same HDR target as the editor so
+      // the post-process stack applies; it is presented after the post pass.
       auto [dw, dh] = m_Window->GetDrawableSize();
-      glViewport(0, 0, dw, dh);
-      m_Camera.SetViewportSize((float)dw, (float)dh);
-    }
+      if (dw > 0 && dh > 0)
+        resizeRenderTargets((uint32_t)dw, (uint32_t)dh);
+      framebuffer->Bind();
+      int winW = 0, winH = 0;
+      SDL_GetWindowSize(m_Window->GetNativeWindow(), &winW, &winH);
+      if (!vrActive) m_GameViewRect = {0.0f, 0.0f, (float)winW, (float)winH};
 #endif
+    }
     if (m_AppState == AppState::Editor) {
       framebuffer->Bind();
     } else if (m_AppState == AppState::Runtime && !(vrActive && vrFrameValid)) {
-      auto [dw, dh] = m_Window->GetDrawableSize();
-      glViewport(0, 0, dw, dh);
-      m_Camera.SetViewportSize((float)dw, (float)dh);
+      glViewport(0, 0, fbSpec.Width, fbSpec.Height);
+      m_Camera.SetViewportSize((float)fbSpec.Width, (float)fbSpec.Height);
     }
 
     RenderState::SetBlend(false);
@@ -2770,9 +3225,7 @@ void Application::Run() {
     const float sceneClear[4] = {skyClear.r, skyClear.g, skyClear.b, skyClear.a};
     const float gbufferClear[4] = {0.0f, 0.0f, 1.0f, 0.0f};
     glClearBufferfv(GL_COLOR, 0, sceneClear);
-#ifndef GAME_MODE_RUNTIME
     glClearBufferfv(GL_COLOR, 1, gbufferClear);
-#endif
     glClear(GL_DEPTH_BUFFER_BIT);
 
     auto skyTexture = m_Scene->GetSkyTexture();
@@ -2817,10 +3270,9 @@ void Application::Run() {
         projMatrix     = m_VRSystem.GetEyeProjectionMatrix(vrEye, 0.05f, 1000.0f);
         viewProjection = projMatrix * viewMatrix;
       } else {
-        auto [runtime_dw, runtime_dh] = m_Window->GetDrawableSize();
-        float aspectRatio = (float)runtime_dw / (float)runtime_dh;
+        float aspectRatio = (float)fbSpec.Width / (float)fbSpec.Height;
 
-        Entity *primaryCamera = m_Scene->GetPrimaryCameraEntity();
+        Entity *primaryCamera = renderCamera;
         if (primaryCamera) {
           glm::mat4 view       = glm::inverse(m_Scene->GetWorldTransform(*primaryCamera));
           glm::mat4 projection = primaryCamera->Camera.GetProjectionMatrix(aspectRatio);
@@ -2864,38 +3316,42 @@ void Application::Run() {
     }
 
     bool planarActive = false;
-    float planarMirrorY = 0.0f;
+    glm::vec4 planarPlane(0.0f, 1.0f, 0.0f, 0.0f);
     for (const auto &e : m_Scene->GetEntities()) {
-      if (e.HasMeshRenderer && e.MeshRenderer.IsReflective) {
+      if ((e.HasMeshRenderer && e.MeshRenderer.IsReflective) || e.HasWater) {
+        const glm::mat4 reflectorWorld = m_Scene->GetWorldTransform(e);
+        if (e.HasMeshRenderer && e.MeshRenderer.Mesh &&
+            !BoundsVisible(viewProjection * reflectorWorld, e.MeshRenderer.Mesh->GetAABBMin(), e.MeshRenderer.Mesh->GetAABBMax())) continue;
         planarActive = true;
-        planarMirrorY = e.Transform.Translation.y;
-        break;
-      }
-      if (e.HasWater) {
-
-        planarActive = true;
-        planarMirrorY = e.Transform.Translation.y;
+        const glm::mat4 world = m_Scene->GetWorldTransform(e);
+        // Reflect across the entity's local XZ plane, including parent transforms.
+        const glm::vec3 normal = glm::normalize(glm::transpose(glm::inverse(glm::mat3(world))) * glm::vec3(0, 1, 0));
+        planarPlane = glm::vec4(normal, -glm::dot(normal, glm::vec3(world[3])));
+        const glm::vec4 eye = glm::inverse(viewMatrix)[3];
+        if (glm::dot(planarPlane, eye) < 0.0f)
+          planarPlane = -planarPlane;
         break;
       }
     }
     glm::mat4 planarVP(1.0f);
     if (planarActive) {
+      { // A reflection texture and its matrix must belong to this eye.
+        glm::mat4 mirrorMat = PlanarReflectionMatrix(planarPlane);
+        glm::mat4 mirrorView = viewMatrix * mirrorMat;
+        planarVP = projMatrix * mirrorView;
 
-      glm::mat4 mirrorMat = glm::translate(glm::mat4(1.0f), glm::vec3(0, planarMirrorY, 0)) *
-                            glm::scale(glm::mat4(1.0f), glm::vec3(1, -1, 1)) *
-                            glm::translate(glm::mat4(1.0f), glm::vec3(0, -planarMirrorY, 0));
-      glm::mat4 mirrorView = viewMatrix * mirrorMat;
-      planarVP = projMatrix * mirrorView;
-
-      planarFB->Bind();
-      glClearColor(m_Scene->GetSkyColor().r, m_Scene->GetSkyColor().g,
-                   m_Scene->GetSkyColor().b, 1.0f);
+        planarFB->Bind();
+        glClearColor(m_Scene->GetSkyColor().r, m_Scene->GetSkyColor().g,
+                     m_Scene->GetSkyColor().b, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
       glEnable(GL_DEPTH_TEST);
       glFrontFace(GL_CW);
 
       planarShader->Bind();
       planarShader->UploadUniformMat4("u_ViewProjection", planarVP);
+      planarShader->UploadUniformFloat4("u_ClipPlane", planarPlane);
+      planarShader->UploadUniformInt("u_DiffuseMap", 0);
+      planarShader->UploadUniformInt("u_LinearMaterialColors", cleanStereo && stereoLook.LinearMaterialColors ? 1 : 0);
 
       glm::vec3 sunDirL{0.3f, -1.0f, -0.3f};
       glm::vec3 sunCol{1, 0.95f, 0.85f};
@@ -2914,6 +3370,16 @@ void Application::Run() {
       planarShader->UploadUniformFloat("u_SunIntensity",  sunI);
       planarShader->UploadUniformFloat3("u_AmbientColor", m_Scene->GetAmbientColor());
       planarShader->UploadUniformFloat("u_AmbientIntensity", m_Scene->GetAmbientIntensity());
+      int reflectedLights = 0;
+      for (const auto &light : m_Scene->GetEntities()) {
+        if (!light.HasLight || light.Light.Type != LightComponent::LightType::Point) continue;
+        const std::string index = std::to_string(reflectedLights);
+        planarShader->UploadUniformFloat4("u_PointPositionRadius[" + index + "]",
+            glm::vec4(glm::vec3(m_Scene->GetWorldTransform(light)[3]), light.Light.Radius));
+        planarShader->UploadUniformFloat3("u_PointColor[" + index + "]", light.Light.Color * light.Light.Intensity);
+        if (++reflectedLights == 8) break;
+      }
+      planarShader->UploadUniformInt("u_PointCount", reflectedLights);
 
       for (const auto &entity : m_Scene->GetEntities()) {
         if (!entity.HasMeshRenderer || !entity.MeshRenderer.Mesh) continue;
@@ -2922,12 +3388,17 @@ void Application::Run() {
         if (entity.MeshRenderer.IsReflective) continue;
 
         if (m_AppState == AppState::Runtime) {
-          Entity *pc = m_Scene->GetPrimaryCameraEntity();
+          Entity *pc = renderCamera;
           if (pc && entity.GetID() == pc->GetID()) continue;
         }
         glm::mat4 model = m_Scene->GetWorldTransform(entity);
+        if (!BoundsVisible(planarVP * model, entity.MeshRenderer.Mesh->GetAABBMin(), entity.MeshRenderer.Mesh->GetAABBMax())) continue;
         planarShader->UploadUniformMat4("u_Transform", model);
         planarShader->UploadUniformFloat4("u_Albedo", entity.MeshRenderer.Color);
+        // ShadowOnly parts (the local head and hat) are visible in reflections.
+        planarShader->UploadUniformInt("u_HasDiffuseMap", entity.MeshRenderer.DiffuseMap ? 1 : 0);
+        if (entity.MeshRenderer.DiffuseMap)
+          entity.MeshRenderer.DiffuseMap->Bind(0);
         entity.MeshRenderer.Mesh->GetVertexArray()->Bind();
         glDrawElements(GL_TRIANGLES,
                        entity.MeshRenderer.Mesh->GetVertexArray()
@@ -2965,7 +3436,7 @@ void Application::Run() {
         if (cullWas) glEnable(GL_CULL_FACE);
       }
       planarFB->Unbind();
-
+      }
       framebuffer->Bind();
     }
 
@@ -2976,12 +3447,15 @@ void Application::Run() {
     shader->UploadUniformFloat("u_ShadowBiasScale", shadowBiasScale);
     shader->UploadUniformInt("u_ShadowPCFRadius", shadowPCFRadius);
     shader->UploadUniformMat3("u_ViewRotation", glm::mat3(viewMatrix));
+    shader->UploadUniformInt("u_LinearMaterialColors", cleanStereo && stereoLook.LinearMaterialColors ? 1 : 0);
+    shader->UploadUniformFloat("u_MinRoughness", cleanStereo ? glm::clamp(stereoLook.MinRoughness, .04f, 1.f) : .04f);
+    shader->UploadUniformFloat2("u_AmbientHemisphere", cleanStereo ? glm::vec2(stereoLook.AmbientSky, stereoLook.AmbientGround) : glm::vec2(1.6f,.35f));
 
     glActiveTexture(GL_TEXTURE7);
     glBindTexture(GL_TEXTURE_2D,
                   planarActive ? planarFB->GetColorAttachmentRendererID() : 0);
     shader->UploadUniformInt("u_PlanarReflection", 7);
-    shader->UploadUniformMat4("u_ViewProjectionPlanar", viewProjection);
+    shader->UploadUniformMat4("u_ViewProjectionPlanar", planarVP);
 
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, shadowFBs[0]->GetDepthAttachmentRendererID());
@@ -3002,20 +3476,17 @@ void Application::Run() {
     if (ibl.Ready) {
       glActiveTexture(GL_TEXTURE4);
       glBindTexture(GL_TEXTURE_CUBE_MAP, ibl.IrradianceMap);
-      shader->UploadUniformInt("u_IrradianceMap", 4);
       glActiveTexture(GL_TEXTURE5);
       glBindTexture(GL_TEXTURE_CUBE_MAP, ibl.PrefilterMap);
-      shader->UploadUniformInt("u_PrefilterMap", 5);
       glActiveTexture(GL_TEXTURE6);
       glBindTexture(GL_TEXTURE_2D, ibl.BRDFLUT);
-      shader->UploadUniformInt("u_BRDFLUT", 6);
       shader->UploadUniformInt("u_HasIBL", 1);
     } else {
       shader->UploadUniformInt("u_HasIBL", 0);
     }
 
     if (m_AppState == AppState::Runtime) {
-      Entity *primaryCamera = m_Scene->GetPrimaryCameraEntity();
+      Entity *primaryCamera = renderCamera;
       if (primaryCamera && primaryCamera->HasCamera) {
         if (primaryCamera->Camera.AntiAliasing)
           glEnable(GL_MULTISAMPLE);
@@ -3027,14 +3498,14 @@ void Application::Run() {
     }
 
     if (m_AppState == AppState::Runtime) {
-      Entity *primaryCamera = m_Scene->GetPrimaryCameraEntity();
+      Entity *primaryCamera = renderCamera;
     }
 
     glm::vec3 cameraPos = m_Camera.GetPosition();
     if (vrActive && vrFrameValid) {
-      cameraPos = m_VRSystem.GetHMDPosition();
+      cameraPos = glm::vec3(glm::inverse(viewMatrix)[3]);
     } else if (m_AppState == AppState::Runtime) {
-      Entity *primaryCamera = m_Scene->GetPrimaryCameraEntity();
+      Entity *primaryCamera = renderCamera;
       if (primaryCamera)
         cameraPos = glm::vec3(m_Scene->GetWorldTransform(*primaryCamera)[3]);
     }
@@ -3112,7 +3583,19 @@ void Application::Run() {
     shader->UploadUniformFloat("u_AmbientIntensity",
                                m_Scene->GetAmbientIntensity());
 
-    shader->UploadUniformInt("u_PointLightCount", (int)pointLights.size());
+    // The shader has eight slots. Sending the full scene count read beyond its
+    // arrays; distant garage lights also displaced the kitchen's own lights.
+    // Rank around the centre of the head so both eyes select the same lights.
+    glm::vec3 lightFocus = vrFrameValid ? glm::vec3(m_VRSystem.GetWorldHeadPose()[3]) : cameraPos;
+    auto relevance = [&](const auto& light) {
+      float distance = glm::distance(light.Pos, lightFocus);
+      float radius = std::max(light.Radius, .01f);
+      return std::max(light.Intensity, 0.0f) * radius * radius / (radius * radius + distance * distance);
+    };
+    std::stable_sort(pointLights.begin(), pointLights.end(), [&](const auto& a, const auto& b) { return relevance(a) > relevance(b); });
+    std::stable_sort(spotLights.begin(), spotLights.end(), [&](const auto& a, const auto& b) { return relevance(a) > relevance(b); });
+    std::stable_sort(areaLights.begin(), areaLights.end(), [&](const auto& a, const auto& b) { return relevance(a) > relevance(b); });
+    shader->UploadUniformInt("u_PointLightCount", (int)std::min((size_t)8,pointLights.size()));
     for (int i = 0; i < (int)pointLights.size() && i < 8; i++) {
       std::string iStr = std::to_string(i);
       shader->UploadUniformFloat3("u_PointLightPositions[" + iStr + "]", pointLights[i].Pos);
@@ -3156,7 +3639,7 @@ void Application::Run() {
       }
 
       if (m_AppState == AppState::Runtime) {
-        Entity *primaryCamera = m_Scene->GetPrimaryCameraEntity();
+        Entity *primaryCamera = renderCamera;
         if (primaryCamera && entity.GetID() == primaryCamera->GetID())
           continue;
       }
@@ -3182,51 +3665,50 @@ void Application::Run() {
       Renderer::Submit(shader, m_VertexArray, transform);
     }
 
+    // Three passes: the opaque scene; see-through meshes (Color alpha below
+    // 1, like window glass), blended over it without writing depth or the
+    // G-buffer; then overlay meshes squeezed into the front of the depth range
+    // so nothing in the world can cover them.
+    for (int scenePass = 0; scenePass < 3; ++scenePass) {
+    bool translucentPass = scenePass == 1, overlayPass = scenePass == 2;
+    if (translucentPass) {
+      RenderState::SetBlend(true);
+      glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+      glDepthMask(GL_FALSE);
+      glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    } else if (overlayPass) {
+      glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+      glDepthMask(GL_TRUE);
+      RenderState::SetDefaultBlendFunc();
+      RenderState::SetBlend(false);
+      glDepthRange(0.0, 0.1);
+    }
+    shader->UploadUniformInt("u_Translucent", translucentPass ? 1 : 0);
     for (auto &entity : m_Scene->GetEntities()) {
       if (!entity.HasMeshRenderer || !entity.MeshRenderer.Mesh)
+        continue;
+
+      if (entity.MeshRenderer.Overlay != overlayPass)
+        continue;
+      if (!overlayPass && (entity.MeshRenderer.Color.a < 0.999f) != translucentPass)
+        continue;
+
+      if (entity.MeshRenderer.ShadowOnly)
         continue;
 
       if (entity.IsUIElement())
         continue;
 
       if (m_AppState == AppState::Runtime) {
-        Entity *primaryCamera = m_Scene->GetPrimaryCameraEntity();
+        Entity *primaryCamera = renderCamera;
         if (primaryCamera && entity.GetID() == primaryCamera->GetID())
           continue;
       }
 
       glm::mat4 transform = m_Scene->GetWorldTransform(entity);
 
-      bool shouldCull = false;
-      Entity *primaryCamEntity = m_Scene->GetPrimaryCameraEntity();
-      if (primaryCamEntity && primaryCamEntity->Camera.FrustumCulling) {
-
-        glm::vec3 mn = entity.MeshRenderer.Mesh->GetAABBMin();
-        glm::vec3 mx = entity.MeshRenderer.Mesh->GetAABBMax();
-        glm::vec4 corners[8] = {
-            {mn.x, mn.y, mn.z, 1.0f}, {mx.x, mn.y, mn.z, 1.0f},
-            {mn.x, mx.y, mn.z, 1.0f}, {mx.x, mx.y, mn.z, 1.0f},
-            {mn.x, mn.y, mx.z, 1.0f}, {mx.x, mn.y, mx.z, 1.0f},
-            {mn.x, mx.y, mx.z, 1.0f}, {mx.x, mx.y, mx.z, 1.0f},
-        };
-        glm::mat4 mvp = viewProjection * transform;
-        int out[6] = {0, 0, 0, 0, 0, 0};
-        for (int i = 0; i < 8; ++i) {
-          glm::vec4 c = mvp * corners[i];
-          if (c.x < -c.w) out[0]++;
-          if (c.x >  c.w) out[1]++;
-          if (c.y < -c.w) out[2]++;
-          if (c.y >  c.w) out[3]++;
-          if (c.z < -c.w) out[4]++;
-          if (c.z >  c.w) out[5]++;
-        }
-        if (out[0] == 8 || out[1] == 8 || out[2] == 8 ||
-            out[3] == 8 || out[4] == 8 || out[5] == 8)
-          shouldCull = true;
-      }
-
-      if (shouldCull)
-        continue;
+      if ((vrActive || (renderCamera && renderCamera->Camera.FrustumCulling)) &&
+          !BoundsVisible(viewProjection * transform, entity.MeshRenderer.Mesh->GetAABBMin(), entity.MeshRenderer.Mesh->GetAABBMax())) continue;
 
       std::shared_ptr<Mesh> meshToRender = entity.MeshRenderer.Mesh;
       if (!entity.MeshRenderer.LODs.empty()) {
@@ -3241,6 +3723,8 @@ void Application::Run() {
       }
 
       shader->UploadUniformInt("u_HasTexture", 0);
+      // Sprites drawn earlier leave their own tiling behind; meshes use their UVs as they are.
+      shader->UploadUniformFloat("u_TilingFactor", 1.0f);
 
       if (entity.MeshRenderer.DiffuseMap) {
         entity.MeshRenderer.DiffuseMap->Bind(1);
@@ -3272,6 +3756,8 @@ void Application::Run() {
                                (planarActive && entity.MeshRenderer.IsReflective) ? 1 : 0);
       Renderer::SubmitMesh(meshToRender, shader, transform);
     }
+    }
+    glDepthRange(0.0, 1.0);
 
     if (m_AppState == AppState::Editor) {
       glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
@@ -3306,7 +3792,7 @@ void Application::Run() {
       for (const auto &e : m_Scene->GetEntities()) {
         if (e.HasWater && e.HasMeshRenderer && e.MeshRenderer.Mesh) { anyWater = true; break; }
       }
-      if (anyWater && !(vrActive && vrFrameValid)) {
+      if (anyWater) {
 
         framebuffer->BlitColorTo(*resolveFB, 0);
         framebuffer->BlitDepthTo(*resolveFB);
@@ -3381,14 +3867,13 @@ void Application::Run() {
           viewNoTrans = glm::mat4(glm::mat3(viewMatrix));
           proj        = projMatrix;
         } else if (m_AppState == AppState::Runtime) {
-          Entity *pc = m_Scene->GetPrimaryCameraEntity();
+          Entity *pc = renderCamera;
           if (pc) {
             glm::quat q(glm::quat_cast(m_Scene->GetWorldTransform(*pc)));
             glm::mat4 rot = glm::mat4_cast(q);
             viewNoTrans = glm::mat4(glm::mat3(glm::inverse(rot)));
-            auto [dw, dh] = m_Window->GetDrawableSize();
             proj = glm::perspective(glm::radians(pc->Camera.PerspectiveFOV),
-                                    (float)dw / (float)dh,
+                                    (float)fbSpec.Width / (float)fbSpec.Height,
                                     pc->Camera.PerspectiveNear,
                                     1000.0f);
           }
@@ -3459,6 +3944,7 @@ void Application::Run() {
           }
           glm::vec3 emitPos = glm::vec3(m_Scene->GetWorldTransform(e)[3]);
 
+          if (vrEye == 0) { // Simulate once, then show identical particles to both eyes.
           ps.EmitAccumulator += ts * ps.EmitRate;
           int toEmit = (int)ps.EmitAccumulator;
           ps.EmitAccumulator -= (float)toEmit;
@@ -3489,6 +3975,8 @@ void Application::Run() {
               p.Size  = glm::mix(ps.StartSize, ps.EndSize, t);
               p.Color = glm::mix(ps.StartColor, ps.EndColor, t);
             }
+          }
+
           }
 
           struct Live { glm::vec3 pos; float size; glm::vec4 color; float depth; };
@@ -3634,24 +4122,20 @@ void Application::Run() {
                   << " | Total Entities: " << m_Scene->GetEntities().size()
                   << " | UI Entities: " << uiCount << std::endl;
       }
-      m_Scene->OnUIRender((float)dw, (float)dh, {0.0f, 0.0f});
+#ifdef GAME_MODE_RUNTIME
+      // Without VR the UI is drawn after the post pass, straight to the window.
+      // The VR UI is submitted once, as its own compositor layer below.
+#else
+      m_Scene->OnUIRender((float)fbSpec.Width, (float)fbSpec.Height,
+                          m_ViewportOffset);
+#endif
     }
 
     if (m_AppState == AppState::Editor) {
       framebuffer->Unbind();
     }
 
-    if (vrActive && vrFrameValid) {
-      m_VRSystem.UnbindEyeFramebuffer(vrEye);
-    }
-
-    }
-
-    if (vrActive && vrFrameValid) {
-      m_VRSystem.EndFrame();
-    }
-
-    if (!(vrActive && vrFrameValid)) {
+    // Every eye uses the same HDR, shadows, reflections and tone mapping as desktop.
     RenderState::SetBlend(false);
 
     framebuffer->BlitColorTo(*resolveFB, 0);
@@ -3661,7 +4145,7 @@ void Application::Run() {
     glDisable(GL_DEPTH_TEST);
     glBindVertexArray(fsQuadVAO);
 
-    if (g_SSREnabled) {
+    if (g_SSREnabled && !vrFrameValid) {
       ssrFB->Bind();
       glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
       glClear(GL_COLOR_BUFFER_BIT);
@@ -3681,7 +4165,8 @@ void Application::Run() {
       glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
-    if (g_SSAOEnabled) {
+    bool useSSAO = (cleanStereo ? stereoLook.ContactAO : g_SSAOEnabled) && (!vrActive || m_VRSystem.GetQuality() > 0);
+    if (useSSAO) {
       ssaoFB->Bind();
       glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT);
@@ -3689,11 +4174,15 @@ void Application::Run() {
       glActiveTexture(GL_TEXTURE0);
       glBindTexture(GL_TEXTURE_2D, resolveFB->GetDepthAttachmentRendererID());
       ssaoShader->UploadUniformInt("u_Depth", 0);
+      glActiveTexture(GL_TEXTURE1);
+      glBindTexture(GL_TEXTURE_2D, resolveFB->GetColorAttachmentRendererID(1));
+      ssaoShader->UploadUniformInt("u_Normals", 1);
+      ssaoShader->UploadUniformMat3("u_ViewRotation", glm::mat3(viewMatrix));
       ssaoShader->UploadUniformMat4("u_Projection", projMatrix);
       ssaoShader->UploadUniformMat4("u_InvProjection", glm::inverse(projMatrix));
-      ssaoShader->UploadUniformFloat("u_Radius", g_SSAORadius);
-      ssaoShader->UploadUniformFloat("u_Bias", g_SSAOBias);
-      ssaoShader->UploadUniformFloat("u_Strength", g_SSAOStrength);
+      ssaoShader->UploadUniformFloat("u_Radius", cleanStereo ? stereoLook.AORadius : g_SSAORadius);
+      ssaoShader->UploadUniformFloat("u_Bias", cleanStereo ? stereoLook.AOBias : g_SSAOBias);
+      ssaoShader->UploadUniformFloat("u_Strength", cleanStereo ? stereoLook.AOStrength : g_SSAOStrength);
       ssaoShader->UploadUniformFloat2("u_NoiseScale",
                                       {(float)ssaoFB->GetSpecification().Width / 4.0f,
                                        (float)ssaoFB->GetSpecification().Height / 4.0f});
@@ -3706,6 +4195,10 @@ void Application::Run() {
       glActiveTexture(GL_TEXTURE0);
       glBindTexture(GL_TEXTURE_2D, ssaoFB->GetColorAttachmentRendererID());
       ssaoBlurShader->UploadUniformInt("u_SSAO", 0);
+      glActiveTexture(GL_TEXTURE1);
+      glBindTexture(GL_TEXTURE_2D, resolveFB->GetDepthAttachmentRendererID());
+      ssaoBlurShader->UploadUniformInt("u_Depth", 1);
+      ssaoBlurShader->UploadUniformMat4("u_InvProjection", glm::inverse(projMatrix));
       glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
@@ -3722,7 +4215,8 @@ void Application::Run() {
     bool horizontal = true;
     Framebuffer* src = bloomA.get();
     Framebuffer* dst = bloomB.get();
-    for (int i = 0; i < g_BlurIterations * 2; ++i) {
+    int blurIters = vrFrameValid ? 2 : g_BlurIterations;
+    for (int i = 0; i < blurIters * 2; ++i) {
       dst->Bind();
       glActiveTexture(GL_TEXTURE0);
       glBindTexture(GL_TEXTURE_2D, src->GetColorAttachmentRendererID());
@@ -3749,14 +4243,16 @@ void Application::Run() {
     postShader->UploadUniformInt("u_Bloom", 1);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D,
-                  g_SSAOEnabled ? ssaoBlurFB->GetColorAttachmentRendererID() : 0);
+                  useSSAO ? ssaoBlurFB->GetColorAttachmentRendererID() : 0);
     postShader->UploadUniformInt("u_SSAO", 2);
-    postShader->UploadUniformInt("u_UseSSAO", g_SSAOEnabled ? 1 : 0);
+    postShader->UploadUniformInt("u_UseSSAO", useSSAO ? 1 : 0);
+    postShader->UploadUniformInt("u_CleanStereo", cleanStereo ? 1 : 0);
+    postShader->UploadUniformInt("u_SpatialAA", vrActive && m_VRSystem.GetQuality() == 0 ? 1 : 0);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D,
                   g_SSREnabled ? ssrFB->GetColorAttachmentRendererID(0) : 0);
     postShader->UploadUniformInt("u_SSR", 3);
-    postShader->UploadUniformInt("u_UseSSR", g_SSREnabled ? 1 : 0);
+    postShader->UploadUniformInt("u_UseSSR", (g_SSREnabled && !vrFrameValid) ? 1 : 0);
     glActiveTexture(GL_TEXTURE4);
     glBindTexture(GL_TEXTURE_2D, resolveFB->GetDepthAttachmentRendererID());
     postShader->UploadUniformInt("u_Depth", 4);
@@ -3764,9 +4260,9 @@ void Application::Run() {
     glBindTexture(GL_TEXTURE_2D, resolveFB->GetColorAttachmentRendererID(1));
     postShader->UploadUniformInt("u_GBuffer", 5);
     postShader->UploadUniformInt("u_DebugView", g_DebugView);
-    postShader->UploadUniformFloat("u_BloomStrength", g_BloomStrength);
+    postShader->UploadUniformFloat("u_BloomStrength", cleanStereo ? stereoLook.BloomStrength : g_BloomStrength);
 
-    if (g_AutoExposure) {
+    if (g_AutoExposure && vrEye == 0) {
 
       glBindTexture(GL_TEXTURE_2D, resolveFB->GetColorAttachmentRendererID());
       glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
@@ -3787,11 +4283,16 @@ void Application::Run() {
       targetExposure = glm::clamp(targetExposure, g_AutoExposureMin, g_AutoExposureMax);
       g_Exposure = glm::mix(g_Exposure, targetExposure, 0.05f);
     }
-    postShader->UploadUniformFloat("u_Exposure", g_Exposure);
-    postShader->UploadUniformFloat("u_Vignette", g_Vignette);
+    postShader->UploadUniformFloat("u_Exposure", cleanStereo ? stereoLook.Exposure : g_Exposure);
+    postShader->UploadUniformFloat("u_Vignette", vrFrameValid ? 0.0f : g_Vignette);
 
-    postShader->UploadUniformFloat("u_ChromaticAberration", g_ChromaticAberration);
-    postShader->UploadUniformFloat("u_FilmGrain", g_FilmGrain);
+    postShader->UploadUniformFloat("u_ChromaticAberration", vrFrameValid ? 0.0f : g_ChromaticAberration);
+    postShader->UploadUniformFloat("u_FilmGrain", vrFrameValid ? 0.0f : g_FilmGrain);
+    postShader->UploadUniformFloat("u_PixelHeight", vrFrameValid ? 0.0f : RenderSettings::Get().PixelHeight);
+    postShader->UploadUniformFloat("u_ColorLevels", vrFrameValid ? 0.0f : RenderSettings::Get().ColorLevels);
+    postShader->UploadUniformFloat("u_DitherStrength", vrFrameValid ? 0.0f : RenderSettings::Get().Dither);
+    postShader->UploadUniformFloat("u_OutlineStrength", cleanStereo ? stereoLook.Outline : RenderSettings::Get().Outline);
+    postShader->UploadUniformInt("u_FogAffectsSky", RenderSettings::Get().FogAffectsSky ? 1 : 0);
     static float s_PostTime = 0.0f;
     s_PostTime += 0.016f;
     postShader->UploadUniformFloat("u_Time", s_PostTime);
@@ -3803,17 +4304,17 @@ void Application::Run() {
     postShader->UploadUniformFloat("u_LensFlareStrength", g_LensFlareStrength);
     postShader->UploadUniformFloat("u_DOFFocusDepth", g_DOFFocusDepth);
     postShader->UploadUniformFloat("u_DOFRange", g_DOFRange);
-    postShader->UploadUniformFloat("u_DOFStrength", g_DOFStrength);
-    postShader->UploadUniformFloat("u_MotionBlur", g_MotionBlur);
-    postShader->UploadUniformFloat("u_TAAStrength", g_TAAStrength);
-    postShader->UploadUniformFloat("u_Contrast", g_Contrast);
-    postShader->UploadUniformFloat("u_Saturation", g_Saturation);
-    postShader->UploadUniformFloat("u_Temperature", g_Temperature);
+    postShader->UploadUniformFloat("u_DOFStrength", vrFrameValid ? 0.0f : g_DOFStrength);
+    postShader->UploadUniformFloat("u_MotionBlur", vrFrameValid ? 0.0f : g_MotionBlur);
+    postShader->UploadUniformFloat("u_TAAStrength", vrFrameValid ? 0.0f : g_TAAStrength);
+    postShader->UploadUniformFloat("u_Contrast", cleanStereo ? stereoLook.Contrast : g_Contrast);
+    postShader->UploadUniformFloat("u_Saturation", cleanStereo ? stereoLook.Saturation : g_Saturation);
+    postShader->UploadUniformFloat("u_Temperature", cleanStereo ? stereoLook.Temperature : g_Temperature);
     postShader->UploadUniformFloat("u_Tint", g_Tint);
     postShader->UploadUniformFloat3("u_Lift",  g_Lift);
     postShader->UploadUniformFloat3("u_Gamma", g_Gamma);
     postShader->UploadUniformFloat3("u_Gain",  g_Gain);
-    postShader->UploadUniformFloat("u_Near", 0.1f);
+    postShader->UploadUniformFloat("u_Near", vrFrameValid ? 0.05f : 0.1f);
     postShader->UploadUniformFloat("u_Far", 1000.0f);
     postShader->UploadUniformMat4("u_InvViewProjection", glm::inverse(viewProjection));
     postShader->UploadUniformMat4("u_PrevViewProjection", m_PrevViewProjection);
@@ -3846,8 +4347,32 @@ void Application::Run() {
     glEnable(GL_DEPTH_TEST);
     ldrFB->Unbind();
 
-    ldrFB->BlitColorTo(*prevFrameFB);
-    m_PrevViewProjection = viewProjection;
+    if (!vrFrameValid) {
+      ldrFB->BlitColorTo(*prevFrameFB);
+      m_PrevViewProjection = viewProjection;
+    }
+
+    if (vrFrameValid) {
+      resolveFB->BlitDepthTo(*ldrFB);
+      ldrFB->Bind();
+      glDisable(GL_FRAMEBUFFER_SRGB);
+      m_VRSystem.RenderWorldUI(viewProjection);
+      ldrFB->Unbind();
+    }
+    if (vrFrameValid && m_VRSystem.BindEyeFramebuffer(vrEye)) {
+      glDisable(GL_FRAMEBUFFER_SRGB); // The post pass has already encoded display colors.
+      ldrFB->BlitColorToBoundFramebuffer(m_VRSystem.GetEyeWidth(), m_VRSystem.GetEyeHeight());
+      m_VRSystem.UnbindEyeFramebuffer(vrEye);
+    }
+
+#ifdef GAME_MODE_RUNTIME
+    if (!vrFrameValid) {
+      auto [dw, dh] = m_Window->GetDrawableSize();
+      ldrFB->BlitColorToScreen((uint32_t)dw, (uint32_t)dh);
+      glViewport(0, 0, dw, dh);
+      m_Scene->OnUIRender((float)dw, (float)dh, {0.0f, 0.0f});
+    }
+#endif
 
     }
 
@@ -3955,6 +4480,14 @@ void Application::Run() {
                          "Pixels with big color change are rejected to kill ghosting.");
     }
 
+    if (ImGui::CollapsingHeader("Retro Look")) {
+      RenderSettings &rs = RenderSettings::Get();
+      ImGui::SliderFloat("Pixel Height", &rs.PixelHeight, 0.0f, 720.0f, "%.0f");
+      ImGui::SliderFloat("Color Levels", &rs.ColorLevels, 0.0f, 32.0f, "%.0f");
+      ImGui::SliderFloat("Dither", &rs.Dither, 0.0f, 1.0f);
+      ImGui::SliderFloat("Outline", &rs.Outline, 0.0f, 1.0f);
+    }
+
     if (ImGui::CollapsingHeader("Assets")) {
       static AssetRegistry s_AssetRegistry;
       static std::filesystem::path s_LastAssetRoot;
@@ -4018,18 +4551,7 @@ void Application::Run() {
     ImVec2 viewportSize = ImGui::GetContentRegionAvail();
     if (viewportSize.x > 0.0f && viewportSize.y > 0.0f &&
         (viewportSize.x != fbSpec.Width || viewportSize.y != fbSpec.Height)) {
-      fbSpec.Width = (uint32_t)viewportSize.x;
-      fbSpec.Height = (uint32_t)viewportSize.y;
-      framebuffer->Resize(fbSpec.Width, fbSpec.Height);
-      resolveFB->Resize(fbSpec.Width, fbSpec.Height);
-      ldrFB->Resize(fbSpec.Width, fbSpec.Height);
-      prevFrameFB->Resize(fbSpec.Width, fbSpec.Height);
-      ssaoFB->Resize(fbSpec.Width, fbSpec.Height);
-      ssaoBlurFB->Resize(fbSpec.Width, fbSpec.Height);
-      ssrFB->Resize(fbSpec.Width, fbSpec.Height);
-      planarFB->Resize(fbSpec.Width / 2, fbSpec.Height / 2);
-      bloomA->Resize(fbSpec.Width / 2, fbSpec.Height / 2);
-      bloomB->Resize(fbSpec.Width / 2, fbSpec.Height / 2);
+      resizeRenderTargets((uint32_t)viewportSize.x, (uint32_t)viewportSize.y);
 
       m_Camera.SetViewportSize(fbSpec.Width, fbSpec.Height);
     }
@@ -4037,6 +4559,7 @@ void Application::Run() {
     uint32_t textureID = ldrFB->GetColorAttachmentRendererID();
     ImVec2 vPos = ImGui::GetCursorScreenPos();
     m_ViewportOffset = {vPos.x, vPos.y};
+    m_GameViewRect = {vPos.x, vPos.y, (float)fbSpec.Width, (float)fbSpec.Height};
 
     ImGui::Image((void *)(intptr_t)textureID,
                  ImVec2((float)fbSpec.Width, (float)fbSpec.Height),
@@ -4293,8 +4816,53 @@ void Application::Run() {
     ImGui::End();
     ImGui::PopStyleVar();
 #endif
+    if (m_AppState == AppState::Runtime)
+      m_Scene->OnImGuiRender();
+
+    if (vrActive && m_VRSystem.HasTracking() && m_VRSystem.IsFocused() &&
+        (m_VRSystem.IsUIInteractive() || m_VRSystem.IsCinemaMode())) {
+      glm::vec2 uv;
+      if (m_VRSystem.GetUIPointer(uv)) {
+        auto& io = ImGui::GetIO();
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        float px = uv.x * io.DisplaySize.x;
+        float py = uv.y * io.DisplaySize.y;
+        const auto& hand = m_VRSystem.GetHandState(m_VRSystem.GetHandState(1).Active ? 1 : 0);
+        bool down = hand.Active && (hand.Trigger > 0.55f || hand.PrimaryBtn);
+        fg->AddCircleFilled(ImVec2(px,py),12,IM_COL32(5,16,26,230));
+        fg->AddCircleFilled(ImVec2(px,py),down?5.0f:3.5f,IM_COL32(245,250,255,255),16);
+        fg->AddCircle(ImVec2(px,py),down?12.0f:9.5f,IM_COL32(255,214,92,255),24,2.0f);
+      }
+    }
+
     ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (!xrFrameValid) ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    if (xrFrameValid && m_VRSystem.BindUIFramebuffer()) {
+      auto [dw, dh] = m_Window->GetDrawableSize();
+      if (m_VRSystem.IsCinemaMode()) {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glBlitFramebuffer(0, 0, dw, dh, 0, 0, VRSystem::kUIWidth, VRSystem::kUIHeight, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+      }
+      ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+      m_VRSystem.UnbindUIFramebuffer();
+      glViewport(0, 0, dw, dh);
+    }
+    if (vrActive) m_VRSystem.EndFrame();
+
+    if (!m_ScreenshotPath.empty()) {
+      auto [dw, dh] = m_Window->GetDrawableSize();
+      std::vector<uint8_t> pixels((size_t)dw * dh * 3);
+      glBindFramebuffer(GL_FRAMEBUFFER, 0);
+      glReadBuffer(GL_BACK);
+      glPixelStorei(GL_PACK_ALIGNMENT, 1);
+      glReadPixels(0, 0, dw, dh, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+      if (!WritePNG(m_ScreenshotPath, pixels, dw, dh))
+        std::cerr << "[App] could not write screenshot " << m_ScreenshotPath << "\n";
+      m_ScreenshotPath.clear();
+    }
+
     m_Window->OnUpdate();
   }
 }
@@ -4608,7 +5176,10 @@ bool Application::OpenProject(const std::filesystem::path& file) {
 
   if (ScriptBuilder::IsStale(m_Project)) {
     auto br = ScriptBuilder::Build(m_Project);
-    if (!br.Ok) std::cerr << "[OpenProject] initial build failed:\n" << br.Log << "\n";
+    if (!br.Ok) {
+      std::cerr << "[OpenProject] initial build failed:\n" << br.Log << "\n";
+      ReportScriptBuildFailure(br.Log);
+    }
   }
 
   {
@@ -4646,6 +5217,7 @@ bool Application::OpenProject(const std::filesystem::path& file) {
   auto full = (m_Project.ProjectRoot / entry->RelativePath).string();
   if (!ser.Deserialize(full)) { m_LastProjectError = "failed to load startup scene"; return false; }
   m_CurrentScenePath = full;
+  MarkSceneSynced();
 
   m_ProjectFilePath = file;
   m_AppState = AppState::Editor;
@@ -4655,6 +5227,7 @@ bool Application::OpenProject(const std::filesystem::path& file) {
 }
 
 void Application::CloseProject() {
+  m_GameHandlesEscape = false;
   m_Scene->Clear();
   SceneManager::SetProject(nullptr);
   m_GameModule.Unload();
@@ -4698,6 +5271,7 @@ bool Application::NewProject(const std::filesystem::path& dir, const std::string
 
 void Application::TogglePlayMode() {
   if (!GetProject()) return;
+  m_GameHandlesEscape = false;
   if (m_AppState == AppState::Runtime) {
 
     AudioEngine::StopAllVoices();
@@ -4706,9 +5280,22 @@ void Application::TogglePlayMode() {
     SceneSerializer(m_Scene).DeserializeFromString(m_PrePlaySceneSnapshot);
     m_AppState = AppState::Editor;
 
+    // Drop whatever look the game's scripts set while playing.
+    RenderSettings &look = RenderSettings::Get();
+    look.PixelHeight = look.ColorLevels = look.Dither = look.Outline = 0.0f;
+    look.FogAffectsSky = true;
+    look.VR.Enabled = false;
+    look.RestorePost = true;
+
     SetMouseLocked(false);
     std::cout << "[Play] stopped\n";
   } else {
+    // Something changed the project outside the editor (git pull, a
+    // generator): play what is on disk, not what was loaded before. A script
+    // build that fails keeps the editor out of Play, with the log on screen.
+    ReloadSceneIfChangedOnDisk();
+    if (ScriptBuilder::IsStale(m_Project) && !ReloadScripts())
+      return;
 
     m_PrePlaySceneSnapshot = SceneSerializer(m_Scene).SerializeToString();
     m_AppState = AppState::Runtime;
@@ -4894,14 +5481,17 @@ std::string Application::BuildStandaloneGame(const std::filesystem::path& outDir
   auto editorDll = fs::path(BuildInfo::EngineLibDll);
   auto editorDir = editorDll.parent_path();
 
-  auto gameRuntimeExe  = editorDir / "GameRuntime.exe";
-  auto engineRuntimeDll= editorDir / "EngineRuntime.dll";
+  // The runtime flavour of the engine DLL has the same file name as the editor
+  // one (so one Game.dll works with both) and lives in its own folder.
+  auto runtimeDir      = editorDir / "runtime";
+  auto gameRuntimeExe  = runtimeDir / "GameRuntime.exe";
+  auto engineRuntimeDll= runtimeDir / editorDll.filename();
   auto sdl2Dll         = editorDir / "SDL2.dll";
 
   if (!fs::exists(gameRuntimeExe))
-    return "GameRuntime.exe not found next to editor. Rebuild the engine.";
+    return "runtime/GameRuntime.exe not found next to editor. Rebuild the engine.";
   if (!fs::exists(engineRuntimeDll))
-    return "EngineRuntime.dll not found next to editor. Rebuild the engine.";
+    return "runtime/EngineLib.dll not found next to editor. Rebuild the engine.";
 
   auto copyOverwrite = [&](const fs::path& from, const fs::path& to) -> std::string {
     std::error_code e;
@@ -4911,7 +5501,7 @@ std::string Application::BuildStandaloneGame(const std::filesystem::path& outDir
   };
 
   if (auto err = copyOverwrite(gameRuntimeExe,  outDir / "GameRuntime.exe"); !err.empty()) return err;
-  if (auto err = copyOverwrite(engineRuntimeDll, outDir / "EngineRuntime.dll"); !err.empty()) return err;
+  if (auto err = copyOverwrite(engineRuntimeDll, outDir / engineRuntimeDll.filename()); !err.empty()) return err;
   if (fs::exists(sdl2Dll)) copyOverwrite(sdl2Dll, outDir / "SDL2.dll");
 
   if (m_ProjectFilePath.empty())
@@ -4919,6 +5509,8 @@ std::string Application::BuildStandaloneGame(const std::filesystem::path& outDir
   if (auto err = copyOverwrite(m_ProjectFilePath,
                                 outDir / m_ProjectFilePath.filename()); !err.empty()) return err;
 
+  if (ScriptBuilder::IsStale(m_Project) && !ReloadScripts())
+    return "Scripts failed to compile (see the popup); the build would ship the old Game.dll.";
   auto gameDll = m_Project.ProjectRoot / m_Project.GameModulePath;
   if (fs::exists(gameDll))
     copyOverwrite(gameDll, outDir / m_Project.GameModulePath);
@@ -4949,8 +5541,8 @@ std::string Application::BuildStandaloneGame(const std::filesystem::path& outDir
   return {};
 }
 
-void Application::ReloadScripts() {
-  if (!GetProject()) return;
+bool Application::ReloadScripts() {
+  if (!GetProject()) return false;
 
   auto snapshot = SceneSerializer(m_Scene).SerializeToString();
 
@@ -4959,22 +5551,62 @@ void Application::ReloadScripts() {
   auto br = ScriptBuilder::Build(m_Project);
   if (!br.Ok) {
     std::cerr << "[ReloadScripts] BUILD FAILED:\n" << br.Log << "\n";
+    ReportScriptBuildFailure(br.Log);
 
     auto modPath = m_Project.ProjectRoot / m_Project.GameModulePath;
     if (std::filesystem::exists(modPath)) m_GameModule.Load(modPath);
-    return;
+    return false;
   }
 
   auto modPath = m_Project.ProjectRoot / m_Project.GameModulePath;
   auto mr = m_GameModule.Load(modPath);
   if (!mr.Ok) {
     std::cerr << "[ReloadScripts] DLL load failed: " << mr.Error << "\n";
-    return;
+    ReportScriptBuildFailure("Game.dll did not load: " + mr.Error);
+    return false;
   }
 
   m_Scene->Clear();
   SceneSerializer(m_Scene).DeserializeFromString(snapshot);
   std::cout << "[ReloadScripts] OK\n";
+  return true;
+}
+
+void Application::ReportScriptBuildFailure(const std::string &log) {
+  // The compiler output is long; the lines with "error" say what broke, and
+  // the tail says where it stopped.
+  std::istringstream in(log);
+  std::string line, errors, tail;
+  std::deque<std::string> last;
+  while (std::getline(in, line)) {
+    if (line.find("error") != std::string::npos && errors.size() < 6000)
+      errors += line + "\n";
+    last.push_back(line);
+    if (last.size() > 25) last.pop_front();
+  }
+  for (const auto &l : last) tail += l + "\n";
+  m_ScriptBuildLog = errors.empty() ? tail : errors;
+  m_ShowScriptBuildError = true;
+}
+
+void Application::MarkSceneSynced() {
+  std::error_code ec;
+  m_SceneFileTime = std::filesystem::last_write_time(m_CurrentScenePath, ec);
+  m_SceneHashAtSync = std::hash<std::string>{}(SceneSerializer(m_Scene).SerializeToString());
+}
+
+void Application::ReloadSceneIfChangedOnDisk() {
+  if (m_CurrentScenePath.empty() || m_SceneHashAtSync == 0) return;
+  std::error_code ec;
+  auto onDisk = std::filesystem::last_write_time(m_CurrentScenePath, ec);
+  if (ec || onDisk == m_SceneFileTime) return;
+  // Edited here since it was loaded: those edits win (Save Scene would
+  // overwrite the file anyway).
+  if (std::hash<std::string>{}(SceneSerializer(m_Scene).SerializeToString()) != m_SceneHashAtSync) return;
+  m_Scene->Clear();
+  if (SceneSerializer(m_Scene).Deserialize(m_CurrentScenePath))
+    std::cout << "[Play] scene changed on disk, reloaded " << m_CurrentScenePath << "\n";
+    MarkSceneSynced();
 }
 
 }

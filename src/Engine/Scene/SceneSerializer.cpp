@@ -338,6 +338,7 @@ static void SerializeEntity(YAML::Emitter &out, const Entity &entity) {
         out << YAML::Key << "ReceivesSSR" << YAML::Value << c.ReceivesSSR;
         out << YAML::Key << "SSRIntensity" << YAML::Value << c.SSRIntensity;
         out << YAML::Key << "IsReflective" << YAML::Value << c.IsReflective;
+        out << YAML::Key << "Overlay" << YAML::Value << c.Overlay;
 
         if (!c.LODs.empty()) {
           out << YAML::Key << "LODs" << YAML::Value << YAML::BeginSeq;
@@ -616,7 +617,7 @@ static bool DeserializeEntity(YAML::Node entityNode,
     READ_VEC4(meshRendererComponent["Color"], mrc.Color);
 
     if (!mrc.FilePath.empty())
-      mrc.Mesh = std::make_shared<Mesh>(mrc.FilePath);
+      mrc.Mesh = Mesh::GetOrLoad(mrc.FilePath);
 
     auto lods = meshRendererComponent["LODs"];
     if (lods) {
@@ -657,6 +658,8 @@ static bool DeserializeEntity(YAML::Node entityNode,
       mrc.SSRIntensity = meshRendererComponent["SSRIntensity"].as<float>();
     if (meshRendererComponent["IsReflective"])
       mrc.IsReflective = meshRendererComponent["IsReflective"].as<bool>();
+    if (meshRendererComponent["Overlay"])
+      mrc.Overlay = meshRendererComponent["Overlay"].as<bool>();
 
     deserializedEntity.HasMeshRenderer = true;
   }

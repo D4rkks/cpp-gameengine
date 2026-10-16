@@ -14,10 +14,36 @@
 
 namespace Engine {
 
+struct RaycastHit {
+  glm::vec3 Point = {0.0f, 0.0f, 0.0f};
+  glm::vec3 Normal = {0.0f, 1.0f, 0.0f};
+  glm::vec3 Velocity = {0.0f, 0.0f, 0.0f};  // of the hit body at Point
+  float Distance = 0.0f;
+  int EntityID = -1;
+};
+
 class ENGINE_API Scene {
 public:
   Scene();
   ~Scene();
+
+  // includeGhosts = false skips bodies made non-solid with SetEntitySolid.
+  bool Raycast(const glm::vec3 &from, const glm::vec3 &to, RaycastHit &outHit,
+               int ignoreEntityID = -1, bool includeGhosts = true) const;
+
+  // Move / push any entity from a script, keeping its rigid body (if it has
+  // one) in step. Rotation is Euler radians, like TransformComponent.
+  void SetEntityPose(Entity &entity, const glm::vec3 &position,
+                     const glm::vec3 &rotation);
+  void SetEntityVelocity(Entity &entity, const glm::vec3 &linear,
+                         const glm::vec3 &angular = {0.0f, 0.0f, 0.0f});
+  glm::vec3 GetEntityVelocity(const Entity &entity) const;
+  // false turns the body into a ghost: still hit by raycasts, but it neither
+  // pushes nor is pushed (for objects a script is carrying around).
+  void SetEntitySolid(Entity &entity, bool solid);
+  // Resizes the entity's collider relative to the size it was created with
+  // (for an object whose shape changes while the game runs).
+  void SetEntityColliderScale(Entity &entity, const glm::vec3 &scale);
 
   Entity CreateEntity(const std::string &name = "Entity");
   void DestroyEntity(Entity entity);
@@ -25,6 +51,8 @@ public:
   void OnUpdate(float ts);
   void OnUpdateEditor(float ts);
   void OnImGuiRender();
+  void OnLateUpdate(float ts);
+  void OnWorldUIRender();
   void OnUIRender(float width = 0.0f, float height = 0.0f,
                   const glm::vec2 &viewportOffset = {0.0f, 0.0f});
 
@@ -50,7 +78,9 @@ public:
   glm::mat4 GetLocalTransform(const Entity &entity) const;
   glm::mat4 GetWorldTransform(UUID uuid) const;
   glm::mat4 GetWorldTransform(const Entity &entity) const {
-    return GetWorldTransform(entity.GetUUID());
+    glm::mat4 local = GetLocalTransform(entity);
+    if (!entity.HasRelationship || entity.Relationship.Parent == 0) return local;
+    return GetWorldTransform(entity.Relationship.Parent) * local;
   }
   void SetLocalTransformFromMatrix(Entity &entity, const glm::mat4 &matrix);
 

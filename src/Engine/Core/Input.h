@@ -15,6 +15,10 @@ public:
   static glm::vec2 GetMouseDelta();
   static float GetMouseX();
   static float GetMouseY();
+  // Wheel movement during the last frame (positive = rolled away from the user).
+  static float GetMouseScroll();
+  // Fed by the application's event loop.
+  static void AddMouseScroll(float amount);
 
   static bool   IsGamepadConnected();
   static bool   IsGamepadButtonPressed(int sdlButton);

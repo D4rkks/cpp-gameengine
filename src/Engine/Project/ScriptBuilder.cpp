@@ -31,7 +31,10 @@ void ScriptBuilder::EnsureCMakeTree(const Project& project) {
       << "list(APPEND GAME_SOURCES \""
       << BuildInfo::EngineIncludeDir << "/Engine/Scripting/GameModuleRuntime.cpp\")\n"
       << "add_library(Game SHARED ${GAME_SOURCES})\n"
-      << "target_compile_definitions(Game PRIVATE GAME_MODULE_BUILD)\n"
+      // ImGui lives in the engine DLL; scripts import it instead of compiling
+      // their own copy (which would have no context).
+      << "target_compile_definitions(Game PRIVATE GAME_MODULE_BUILD"
+         " \"IMGUI_API=__declspec(dllimport)\")\n"
       << [&]() -> std::string {
              std::ostringstream dirs;
              dirs << "target_include_directories(Game PRIVATE\n";
@@ -82,9 +85,11 @@ BuildResult ScriptBuilder::Build(const Project& project) {
     cfg << "\"" << BuildInfo::CMakeExecutable << "\""
         << " -S \"" << buildDir.string() << "\""
         << " -B \"" << (buildDir / "build").string() << "\""
-        << " -G \"" << BuildInfo::EngineGenerator << "\""
-        << " -A " << BuildInfo::EngineArch
-        << " 2>&1";
+        << " -G \"" << BuildInfo::EngineGenerator << "\"";
+    // Empty when the engine was configured with the generator's default platform.
+    if (BuildInfo::EngineArch[0] != '\0')
+        cfg << " -A " << BuildInfo::EngineArch;
+    cfg << " 2>&1";
 
     std::stringstream bld;
     bld << "\"" << BuildInfo::CMakeExecutable << "\""
@@ -93,7 +98,9 @@ BuildResult ScriptBuilder::Build(const Project& project) {
         << " 2>&1";
 
     auto run = [](const std::string& cmd, std::string& log) -> int {
-        FILE* p = _popen(cmd.c_str(), "r");
+        // cmd.exe strips the first and last quote of a command that starts with
+        // one, so the whole line gets an extra pair to keep the inner quoting.
+        FILE* p = _popen(("\"" + cmd + "\"").c_str(), "r");
         if (!p) return -1;
         char buf[4096];
         while (fgets(buf, sizeof(buf), p)) log += buf;

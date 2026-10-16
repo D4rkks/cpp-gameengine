@@ -1,4 +1,6 @@
 #include "ContentBrowserPanel.h"
+#include "Engine/Core/EngineBuildInfo.h"
+#include <SDL.h>
 #include <imgui.h>
 #include <iostream>
 #include <cstdio>
@@ -16,10 +18,20 @@ static void EnsureContentBrowserIcons(std::shared_ptr<Texture2D>& dir,
                                       std::shared_ptr<Texture2D>& scene,
                                       std::shared_ptr<Texture2D>& model) {
   if (dir) return;
-  dir   = std::make_shared<Texture2D>("resources/editor/textures/folder.png");
-  file  = std::make_shared<Texture2D>("resources/editor/textures/file.png");
-  scene = std::make_shared<Texture2D>("resources/editor/textures/scene.png");
-  model = std::make_shared<Texture2D>("resources/editor/textures/model.png");
+  // Opening a project changes CWD to its asset root. Editor resources belong
+  // to the engine installation, regardless of which project is open.
+  std::filesystem::path icons;
+  if (char* base = SDL_GetBasePath()) {
+    icons = std::filesystem::path(base) / "resources/editor/textures";
+    SDL_free(base);
+  }
+  if (!std::filesystem::exists(icons / "folder.png"))
+    icons = std::filesystem::path(BuildInfo::EngineIncludeDir).parent_path() /
+            "resources/editor/textures";
+  dir   = std::make_shared<Texture2D>((icons / "folder.png").string());
+  file  = std::make_shared<Texture2D>((icons / "file.png").string());
+  scene = std::make_shared<Texture2D>((icons / "scene.png").string());
+  model = std::make_shared<Texture2D>((icons / "model.png").string());
 }
 
 void ContentBrowserPanel::OnImGuiRender() {

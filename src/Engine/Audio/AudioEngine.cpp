@@ -20,6 +20,8 @@ glm::vec3 AudioEngine::s_ListenerForward   = {0, 0, -1};
 glm::vec3 AudioEngine::s_ListenerUp        = {0, 1, 0};
 glm::vec3 AudioEngine::s_ListenerPrevPos   = {0, 0, 0};
 glm::vec3 AudioEngine::s_ListenerVelocity  = {0, 0, 0};
+glm::vec3 AudioEngine::s_ListenerVelocityGiven = {0, 0, 0};
+float      AudioEngine::s_ListenerVelocityAge = 1e9f;
 bool       AudioEngine::s_ListenerPrevPosValid = false;
 float      AudioEngine::s_SpeedOfSound  = 343.0f;
 float      AudioEngine::s_DopplerFactor = 1.0f;
@@ -168,6 +170,19 @@ void AudioEngine::SetVoicePosition(const std::string &name, const glm::vec3 &pos
   std::lock_guard<std::mutex> lock(s_Mutex);
   for (auto *v : s_ActiveVoices) if (v->Name == name) v->position = pos;
 }
+void AudioEngine::SetVoiceVolume(const std::string &name, float volume) {
+  std::lock_guard<std::mutex> lock(s_Mutex);
+  for (auto *v : s_ActiveVoices) if (v->Name == name) v->volume = volume;
+}
+void AudioEngine::StopVoice(const std::string &name) {
+  std::lock_guard<std::mutex> lock(s_Mutex);
+  for (auto *v : s_ActiveVoices) if (v->Name == name) v->finished = true;
+}
+bool AudioEngine::IsPlaying(const std::string &name) {
+  std::lock_guard<std::mutex> lock(s_Mutex);
+  for (auto *v : s_ActiveVoices) if (v->Name == name && !v->finished) return true;
+  return false;
+}
 void AudioEngine::SetListenerTransform(const glm::vec3 &pos, const glm::vec3 &fwd,
                                        const glm::vec3 &up) {
   std::lock_guard<std::mutex> lock(s_Mutex);
@@ -177,7 +192,8 @@ void AudioEngine::SetListenerTransform(const glm::vec3 &pos, const glm::vec3 &fw
 }
 void AudioEngine::SetListenerVelocity(const glm::vec3 &v) {
   std::lock_guard<std::mutex> lock(s_Mutex);
-  s_ListenerVelocity = v;
+  s_ListenerVelocityGiven = v;
+  s_ListenerVelocityAge = 0.0f;
 }
 void AudioEngine::SetVoicePitch(const std::string &name, float pitch) {
   std::lock_guard<std::mutex> lock(s_Mutex);
@@ -202,20 +218,35 @@ float AudioEngine::GetBusVolume(AudioBus bus) {
 void AudioEngine::Update(float ts) {
   std::lock_guard<std::mutex> lock(s_Mutex);
 
-  if (s_ListenerPrevPosValid && ts > 0.0f) {
-    s_ListenerVelocity = (s_ListenerPos - s_ListenerPrevPos) / ts;
-  } else {
-    s_ListenerVelocity = {0, 0, 0};
+  // Velocities for the Doppler shift. A camera is a poor stand-in for the
+  // listener's body: turning swings it around the head (or around the player,
+  // in third person) and cuts teleport it. So a velocity the game gives
+  // (SetListenerVelocity: the player's body) wins; without one, it comes from
+  // the camera's movement, ignoring jumps and capped. Either way it is smoothed.
+  s_ListenerVelocityAge += ts;
+  glm::vec3 listener(0.0f);
+  if (s_ListenerVelocityAge < 0.25f) {
+    listener = s_ListenerVelocityGiven;
+  } else if (s_ListenerPrevPosValid && ts > 0.0f && glm::length(s_ListenerPos - s_ListenerPrevPos) < 1.0f) {
+    listener = (s_ListenerPos - s_ListenerPrevPos) / ts;
   }
+  float listenerSpeed = glm::length(listener);
+  if (listenerSpeed > 30.0f) listener *= 30.0f / listenerSpeed;
+  float blend = ts > 0.0f ? 1.0f - std::exp(-ts / 0.08f) : 1.0f;
+  s_ListenerVelocity = glm::mix(s_ListenerVelocity, listener, blend);
   s_ListenerPrevPos = s_ListenerPos;
   s_ListenerPrevPosValid = true;
 
   for (auto *v : s_ActiveVoices) {
-    if (v->previousPositionValid && ts > 0.0f) {
-      v->velocity = (v->position - v->previousPosition) / ts;
-    } else {
-      v->velocity = {0, 0, 0};
-    }
+    // A source that moves by more than a metre in a frame was moved (a loop
+    // following the nearest stove, say), not flying: no Doppler from that.
+    glm::vec3 moved = v->position - v->previousPosition;
+    glm::vec3 measured(0.0f);
+    if (v->previousPositionValid && ts > 0.0f && glm::length(moved) < 1.0f)
+      measured = moved / ts;
+    float sourceSpeed = glm::length(measured);
+    if (sourceSpeed > 30.0f) measured *= 30.0f / sourceSpeed;
+    v->velocity = glm::mix(v->velocity, measured, blend);
     v->previousPosition = v->position;
     v->previousPositionValid = true;
   }
@@ -252,8 +283,19 @@ void AudioEngine::AudioCallback(void * , uint8_t *stream, int len) {
     float vSource   = glm::dot(voice->velocity,    -toListener);
     float doppler = (s_SpeedOfSound + vListener * s_DopplerFactor) /
                     std::max(0.001f, s_SpeedOfSound + vSource * s_DopplerFactor);
-    doppler = glm::clamp(doppler, 0.25f, 4.0f);
-    double playbackSpeed = doppler * voice->pitch;
+    doppler = glm::clamp(doppler, 0.5f, 2.0f);
+    // Doppler only makes sense for sounds that come from somewhere: music and
+    // UI (non-spatial) keep their pitch whatever the camera does.
+    if (!voice->isSpatial) doppler = 1.0f;
+    // The speed glides to the new value (~40 ms) instead of jumping at every
+    // buffer, which would warble.
+    float targetSpeed = doppler * voice->pitch;
+    if (!voice->speedValid) {
+      voice->speed = targetSpeed;
+      voice->speedValid = true;
+    }
+    const float glide = 1.0f - std::exp(-1.0f / (0.04f * (float)s_DeviceSpec.freq));
+    int srcChannels = s_DeviceSpec.channels;
 
     float leftGain = 1.0f, rightGain = 1.0f;
     if (voice->isSpatial) {
@@ -290,18 +332,21 @@ void AudioEngine::AudioCallback(void * , uint8_t *stream, int len) {
         voice->finished = true;
         break;
       }
-      int idx0 = f0 * s_DeviceSpec.channels;
-      int idx1 = f1 * s_DeviceSpec.channels;
-      int s0 = src[idx0];
-      int s1 = src[idx1];
-      int sample = (int)((1.0 - t) * s0 + t * s1);
+      int idx0 = f0 * srcChannels;
+      int idx1 = f1 * srcChannels;
+      // Both channels of stereo files (music): left stays left. A positioned
+      // sound is folded to mono first and then panned.
+      float left = (float)((1.0 - t) * src[idx0] + t * src[idx1]);
+      float right = srcChannels > 1 ? (float)((1.0 - t) * src[idx0 + 1] + t * src[idx1 + 1]) : left;
+      if (voice->isSpatial) left = right = 0.5f * (left + right);
 
-      int outL = out[i * 2 + 0] + (int)(sample * leftGain);
-      int outR = out[i * 2 + 1] + (int)(sample * rightGain);
+      int outL = out[i * 2 + 0] + (int)(left * leftGain);
+      int outR = out[i * 2 + 1] + (int)(right * rightGain);
       out[i * 2 + 0] = (int16_t)glm::clamp(outL, -32768, 32767);
       out[i * 2 + 1] = (int16_t)glm::clamp(outR, -32768, 32767);
 
-      voice->sampleCursorFrames += playbackSpeed;
+      voice->speed += (targetSpeed - voice->speed) * glide;
+      voice->sampleCursorFrames += voice->speed;
       if (voice->loop) {
         if (voice->sampleCursorFrames >= srcFrames) voice->sampleCursorFrames -= srcFrames;
       }

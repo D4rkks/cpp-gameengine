@@ -40,7 +40,9 @@ public:
 
   const std::string& GetLastProjectError() const { return m_LastProjectError; }
 
-  void ReloadScripts();
+  // Recompiles Game.dll and reloads it, keeping the scene. False when the
+  // build failed: the previous Game.dll stays loaded and a popup shows the log.
+  bool ReloadScripts();
 
   void TogglePlayMode();
   bool IsPlaying() const { return m_AppState == AppState::Runtime; }
@@ -124,6 +126,19 @@ private:
 
   std::unordered_map<std::string, std::string> m_SaveGameKV;
 
+  // Scripts that failed to compile: the old Game.dll keeps running, which is
+  // easy to miss, so the editor shows the compiler output in a popup.
+  bool m_ShowScriptBuildError = false;
+  std::string m_ScriptBuildLog;
+  void ReportScriptBuildFailure(const std::string &log);
+  // The scene file as it was when last loaded or saved here. Pressing Play
+  // reloads it from disk when it changed outside (git pull, a generator) and
+  // nothing was edited in the editor since.
+  std::filesystem::file_time_type m_SceneFileTime{};
+  size_t m_SceneHashAtSync = 0;
+  void MarkSceneSynced();
+  void ReloadSceneIfChangedOnDisk();
+
   bool m_ShowBuildDialog = false;
   char m_BuildOutputBuf[512] = "";
   std::string m_BuildResultMsg;
@@ -131,8 +146,21 @@ private:
 
   VRSystem m_VRSystem;
 
+  std::string m_ScreenshotPath;
+  glm::vec4   m_GameViewRect = {0.0f, 0.0f, 1280.0f, 720.0f};
+  bool m_GameHandlesEscape = false;
+
 public:
   static Application &Get() { return *s_Instance; }
+
+  void Quit() { m_Running = false; }
+
+  // Saves the final frame (game + UI) as a PNG at the end of the current frame.
+  void RequestScreenshot(const std::string &path) { m_ScreenshotPath = path; }
+
+  // Where the game is shown, in window pixels: {x, y, width, height}. The whole
+  // window in the standalone runtime, the Viewport panel in the editor.
+  glm::vec4 GetGameViewRect() const { return m_GameViewRect; }
   Window &GetWindow() { return *m_Window; }
   GameModule& GetGameModule() { return m_GameModule; }
   VRSystem& GetVRSystem() { return m_VRSystem; }
@@ -141,6 +169,9 @@ public:
 
   void SetMouseLocked(bool locked);
   bool IsMouseLocked() const { return m_MouseLocked; }
+  // Games with their own menus can handle Escape without the engine also
+  // toggling mouse capture or stopping Play in the editor.
+  void SetGameHandlesEscape(bool handles) { m_GameHandlesEscape = handles; }
 
   void LoadScene(const std::string &path);
 };

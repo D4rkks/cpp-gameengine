@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../Animation/Skeleton.h"
+#include "../Core/EngineAPI.h"
 #include <glm/glm.hpp>
 #include <memory>
 #include <string>
@@ -24,6 +25,10 @@ class Mesh {
 public:
   Mesh(const std::string &filepath);
   ~Mesh();
+
+  // Shared, cached load: entities using the same file get the same mesh. Game
+  // scripts use this to swap an entity's MeshRenderer.Mesh at runtime.
+  ENGINE_API static std::shared_ptr<Mesh> GetOrLoad(const std::string &filepath);
 
   void Bind() const;
   void Unbind() const;

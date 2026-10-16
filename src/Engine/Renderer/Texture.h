@@ -1,4 +1,5 @@
 #pragma once
+#include "../Core/EngineAPI.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -12,7 +13,8 @@ public:
   Texture2D(uint32_t width, uint32_t height);
   ~Texture2D();
 
-  static std::shared_ptr<Texture2D> GetOrLoad(const std::string &path);
+  // Exported so game scripts can swap an entity's texture at run time.
+  ENGINE_API static std::shared_ptr<Texture2D> GetOrLoad(const std::string &path);
   static void ClearCache();
 
   uint32_t GetID() const { return m_RendererID; }

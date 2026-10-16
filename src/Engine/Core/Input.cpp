@@ -52,10 +52,20 @@ bool Input::IsMouseButtonPressed(int button) {
 
 glm::vec2 Input::s_MouseDelta = {0.0f, 0.0f};
 
+namespace {
+float s_ScrollPending = 0.0f;  // wheel events since the last Update
+float s_Scroll = 0.0f;         // what GetMouseScroll reports this frame
+}
+
+float Input::GetMouseScroll() { return s_Scroll; }
+void Input::AddMouseScroll(float amount) { s_ScrollPending += amount; }
+
 void Input::Update() {
   int x, y;
   SDL_GetRelativeMouseState(&x, &y);
   s_MouseDelta = {(float)x, (float)y};
+  s_Scroll = s_ScrollPending;
+  s_ScrollPending = 0.0f;
   EnsurePadOpen();
 
   if (s_Pad && !SDL_GameControllerGetAttached(s_Pad)) {

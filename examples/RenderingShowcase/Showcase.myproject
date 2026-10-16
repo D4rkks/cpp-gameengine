@@ -1,0 +1,13 @@
+{
+  "Project": {
+    "Name": "Rendering Showcase",
+    "StartupScene": "Materials",
+    "GameModule": "Game.dll",
+    "Scenes": [
+      {
+        "Name": "Materials",
+        "Path": "Assets/Scenes/Materials.scene"
+      }
+    ]
+  }
+}

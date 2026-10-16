@@ -191,6 +191,16 @@ void Framebuffer::BlitDepthTo(Framebuffer &target) {
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+void Framebuffer::BlitColorToScreen(uint32_t width, uint32_t height) {
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, m_RendererID);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+  glReadBuffer(GL_COLOR_ATTACHMENT0);
+  glDrawBuffer(GL_BACK);
+  glBlitFramebuffer(0, 0, m_Specification.Width, m_Specification.Height,
+                    0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
 void Framebuffer::Resize(uint32_t width, uint32_t height) {
   if (width == 0 || height == 0 ||
       (width == m_Specification.Width && height == m_Specification.Height))
@@ -200,6 +210,20 @@ void Framebuffer::Resize(uint32_t width, uint32_t height) {
   m_Specification.Height = height;
 
   Invalidate();
+}
+
+void Framebuffer::SetSamples(uint32_t samples) {
+  if (samples == 0 || m_Specification.Samples == samples) return;
+  m_Specification.Samples = samples;
+  Invalidate();
+}
+
+void Framebuffer::BlitColorToBoundFramebuffer(uint32_t width, uint32_t height) {
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, m_RendererID);
+  glReadBuffer(GL_COLOR_ATTACHMENT0);
+  glBlitFramebuffer(0, 0, m_Specification.Width, m_Specification.Height,
+                    0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
 }
 
 Framebuffer *Framebuffer::Create(const FramebufferSpecification &spec) {

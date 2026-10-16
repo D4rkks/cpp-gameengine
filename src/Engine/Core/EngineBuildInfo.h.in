@@ -10,5 +10,5 @@ namespace Engine::BuildInfo {
     inline constexpr const char* EngineGenerator  = R"(@CMAKE_GENERATOR@)";
     inline constexpr const char* EngineArch       = R"(@CMAKE_GENERATOR_PLATFORM@)";
     // Semicolon-separated list of all dep include dirs needed to compile game scripts.
-    inline constexpr const char* EngineDepsIncludeDirs = R"(@SDL2_SOURCE_DIR@/include;@glm_SOURCE_DIR@;@imgui_SOURCE_DIR@;@imgui_SOURCE_DIR@/backends;@imguizmo_SOURCE_DIR@;@bullet_SOURCE_DIR@/src;@tinyobjloader_SOURCE_DIR@;@CMAKE_BINARY_DIR@/_deps/glew-src/include)";
+    inline constexpr const char* EngineDepsIncludeDirs = R"(@SDL2_SOURCE_DIR@/include;@glm_SOURCE_DIR@;@imgui_SOURCE_DIR@;@imgui_SOURCE_DIR@/backends;@imguizmo_SOURCE_DIR@;@bullet_SOURCE_DIR@/src;@tinyobjloader_SOURCE_DIR@;@glew_SOURCE_DIR@/include)";
 }

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <iostream>
 #include <limits>
+#include <unordered_map>
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
@@ -160,6 +161,17 @@ FinalizeMesh:
 }
 
 Mesh::~Mesh() {}
+
+std::shared_ptr<Mesh> Mesh::GetOrLoad(const std::string &filepath) {
+  static std::unordered_map<std::string, std::weak_ptr<Mesh>> s_Cache;
+  auto it = s_Cache.find(filepath);
+  if (it != s_Cache.end())
+    if (auto mesh = it->second.lock())
+      return mesh;
+  auto mesh = std::make_shared<Mesh>(filepath);
+  s_Cache[filepath] = mesh;
+  return mesh;
+}
 
 void Mesh::Bind() const {
   if (m_VertexArray)

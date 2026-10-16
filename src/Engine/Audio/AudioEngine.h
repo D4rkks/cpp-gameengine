@@ -34,6 +34,8 @@ struct ActiveVoice {
   glm::vec3 previousPosition = {0, 0, 0};
   glm::vec3 velocity = {0, 0, 0};
   float pitch = 1.0f;
+  float speed = 1.0f;          // playback speed actually in use (glides to pitch x Doppler)
+  bool speedValid = false;
   double sampleCursorFrames = 0.0;
   bool previousPositionValid = false;
 
@@ -54,6 +56,9 @@ public:
   static void  SetBusVolume(AudioBus bus, float vol);
   static float GetBusVolume(AudioBus bus);
   static void SetVoicePosition(const std::string &name, const glm::vec3 &pos);
+  static void SetVoiceVolume(const std::string &name, float volume);
+  static void StopVoice(const std::string &name);
+  static bool IsPlaying(const std::string &name);
 
   static void SetListenerTransform(const glm::vec3 &pos,
                                    const glm::vec3 &forward,
@@ -82,6 +87,8 @@ private:
 
   static glm::vec3 s_ListenerPrevPos;
   static glm::vec3 s_ListenerVelocity;
+  static glm::vec3 s_ListenerVelocityGiven;  // set by the game (SetListenerVelocity)...
+  static float s_ListenerVelocityAge;        // ...this long ago
   static bool s_ListenerPrevPosValid;
 
   static float s_SpeedOfSound;

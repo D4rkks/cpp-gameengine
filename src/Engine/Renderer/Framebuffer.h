@@ -37,7 +37,11 @@ public:
 
   void BlitDepthTo(Framebuffer &target);
 
+  void BlitColorToScreen(uint32_t width, uint32_t height);
+  void BlitColorToBoundFramebuffer(uint32_t width, uint32_t height);
+
   void Resize(uint32_t width, uint32_t height);
+  void SetSamples(uint32_t samples);
 
   uint32_t GetColorAttachmentRendererID(int index = 0) const {
     return (index < (int)m_ColorAttachments.size()) ? m_ColorAttachments[index] : 0;

@@ -41,10 +41,14 @@ FetchContent_MakeAvailable(imgui)
 # -----------------------------------------------------------------------------
 # ImGuizmo
 # -----------------------------------------------------------------------------
+set(IMGUIZMO_PATCH_ARGS "")
+if(EXISTS "${CMAKE_SOURCE_DIR}/cmake/patch_imguizmo.ps1")
+    set(IMGUIZMO_PATCH_ARGS PATCH_COMMAND powershell -ExecutionPolicy Bypass -File ${CMAKE_SOURCE_DIR}/cmake/patch_imguizmo.ps1)
+endif()
 FetchContent_Declare(
     imguizmo
     URL https://github.com/CedricGuillemet/ImGuizmo/archive/refs/heads/master.zip
-    PATCH_COMMAND powershell -ExecutionPolicy Bypass -File ${CMAKE_SOURCE_DIR}/cmake/patch_imguizmo.ps1
+    ${IMGUIZMO_PATCH_ARGS}
 )
 FetchContent_GetProperties(imguizmo)
 if(NOT imguizmo_POPULATED)
@@ -89,6 +93,7 @@ message(STATUS "DEBUG: bullet_SOURCE_DIR = ${bullet_SOURCE_DIR}")
 set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(YAML_MSVC_SHARED_RT ON CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
     yaml-cpp
@@ -128,7 +133,8 @@ file(GLOB_RECURSE ENGINE_SOURCES
 list(REMOVE_ITEM ENGINE_SOURCES "${CMAKE_SOURCE_DIR}/src/Engine/Scripting/GameModuleRuntime.cpp")
 
 add_library(EngineLib SHARED ${ENGINE_SOURCES})
-target_compile_definitions(EngineLib PRIVATE ENGINELIB_BUILD)
+# ImGui is exported from the engine DLL so game scripts (Game.dll) can call it.
+target_compile_definitions(EngineLib PRIVATE ENGINELIB_BUILD "IMGUI_API=__declspec(dllexport)")
 set_target_properties(EngineLib PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF)
 target_include_directories(EngineLib PUBLIC
     include
@@ -138,7 +144,6 @@ target_include_directories(EngineLib PUBLIC
     ${imguizmo_SOURCE_DIR}/src
     ${bullet_SOURCE_DIR}/src
     ${tinyobjloader_SOURCE_DIR}
-    ${CMAKE_BINARY_DIR}/_deps/glew-src/include
     ${openxr_SOURCE_DIR}/include
 )
 target_compile_definitions(EngineLib PUBLIC GLEW_STATIC GLM_ENABLE_EXPERIMENTAL)
@@ -150,6 +155,7 @@ FetchContent_Declare(
     PATCH_COMMAND powershell -Command "(Get-Content build/cmake/CMakeLists.txt).Replace('VERSION 2.8.12', 'VERSION 3.20') | Set-Content build/cmake/CMakeLists.txt -Encoding Ascii"
 )
 FetchContent_MakeAvailable(glew)
+target_include_directories(EngineLib PUBLIC ${glew_SOURCE_DIR}/include)
 message(STATUS "DEBUG: glew_SOURCE_DIR = ${glew_SOURCE_DIR}")
 target_link_libraries(EngineLib PUBLIC SDL2::SDL2main SDL2::SDL2 opengl32 glm::glm glew_s BulletDynamics BulletCollision LinearMath yaml-cpp openxr_loader)
 
@@ -169,8 +175,18 @@ target_sources(EngineLib PRIVATE
 # Engine Runtime Library (No Editor)
 # -----------------------------------------------------------------------------
 add_library(EngineRuntime SHARED ${ENGINE_SOURCES})
-target_compile_definitions(EngineRuntime PRIVATE ENGINELIB_BUILD)
+target_compile_definitions(EngineRuntime PRIVATE ENGINELIB_BUILD "IMGUI_API=__declspec(dllexport)")
 set_target_properties(EngineRuntime PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF)
+# The runtime DLL has the same file name as the editor one, in its own folder:
+# a project's Game.dll imports "EngineLib.dll" by name, so one Game.dll then
+# works both in the editor and in the standalone runtime.
+set_target_properties(EngineRuntime PROPERTIES
+    OUTPUT_NAME EngineLib
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>/runtime"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<CONFIG>/runtime"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<CONFIG>/runtime"
+    PDB_OUTPUT_DIRECTORY     "${CMAKE_BINARY_DIR}/bin/$<CONFIG>/runtime"
+)
 target_compile_definitions(EngineRuntime PUBLIC GAME_MODE_RUNTIME GLEW_STATIC GLM_ENABLE_EXPERIMENTAL)
 target_include_directories(EngineRuntime PUBLIC
     include
@@ -180,7 +196,7 @@ target_include_directories(EngineRuntime PUBLIC
     ${imguizmo_SOURCE_DIR}/src
     ${bullet_SOURCE_DIR}/src
     ${tinyobjloader_SOURCE_DIR}
-    ${CMAKE_BINARY_DIR}/_deps/glew-src/include
+    ${glew_SOURCE_DIR}/include
     ${openxr_SOURCE_DIR}/include
 )
 target_link_libraries(EngineRuntime PUBLIC SDL2::SDL2main SDL2::SDL2 opengl32 glm::glm glew_s BulletDynamics BulletCollision LinearMath yaml-cpp openxr_loader)
@@ -238,6 +254,10 @@ target_include_directories(EngineRuntime PRIVATE ${CMAKE_BINARY_DIR}/generated/$
 # -----------------------------------------------------------------------------
 add_executable(GameRuntime src/main.cpp)
 target_link_libraries(GameRuntime PRIVATE EngineRuntime)
+set_target_properties(GameRuntime PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>/runtime"
+    PDB_OUTPUT_DIRECTORY     "${CMAKE_BINARY_DIR}/bin/$<CONFIG>/runtime"
+)
 # target_compile_definitions(GameRuntime PRIVATE GAME_MODE_RUNTIME) # Already defined in EngineRuntime PUBLIC
 
 # Copy SDL2.dll and EngineLib.dll to output directory on Windows
@@ -258,6 +278,12 @@ if(WIN32)
         ${CMAKE_SOURCE_DIR}/resources
         $<TARGET_FILE_DIR:Engine>/resources
     )
+    # Engine assets (default font) — loaded as "assets/..." relative to CWD.
+    add_custom_command(TARGET Engine POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/assets
+        $<TARGET_FILE_DIR:Engine>/assets
+    )
     add_custom_command(TARGET GameRuntime POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:SDL2::SDL2>
@@ -277,15 +303,9 @@ if(WIN32)
 endif()
 
 # -----------------------------------------------------------------------------
-# GoogleTest (tests)
+# Engine checks (no test-framework download is required)
 # -----------------------------------------------------------------------------
-enable_testing()
-FetchContent_Declare(
-    googletest
-    URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
-)
-set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
-
-add_subdirectory(tests)
-
+include(CTest)
+if(BUILD_TESTING AND EXISTS "${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt")
+    add_subdirectory(tests)
+endif()

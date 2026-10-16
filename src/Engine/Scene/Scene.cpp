@@ -25,17 +25,26 @@
 
 namespace Engine {
 
+namespace {
+// A small body moving more than its own thickness in one step would pass clean
+// through a wall or a table top. Past that speed Bullet sweeps a sphere along
+// its path and stops it at the first thing in the way.
+void UpdateContinuousCollision(btRigidBody *body) {
+  btVector3 low, high;
+  body->getCollisionShape()->getAabb(btTransform::getIdentity(), low, high);
+  btVector3 half = (high - low) * btScalar(0.5);
+  btScalar thinnest = std::min({half.x(), half.y(), half.z()});
+  body->setCcdMotionThreshold(thinnest);
+  body->setCcdSweptSphereRadius(thinnest * btScalar(0.8));
+}
+}
+
 Scene::Scene() {
   m_DefaultFont = std::make_shared<Font>("assets/fonts/arial.ttf", 96.0f);
 }
 
 Scene::~Scene() {
   OnPhysicsStop();
-  delete (btDiscreteDynamicsWorld *)m_PhysicsWorld;
-  delete (btSequentialImpulseConstraintSolver *)m_Solver;
-  delete (btDbvtBroadphase *)m_Broadphase;
-  delete (btCollisionDispatcher *)m_Dispatcher;
-  delete (btDefaultCollisionConfiguration *)m_CollisionConfiguration;
 }
 
 Entity Scene::CreateEntity(const std::string &name) {
@@ -138,7 +147,50 @@ void Scene::OnUpdate(float ts) {
       }
     }
 
-    ((btDiscreteDynamicsWorld *)m_PhysicsWorld)->stepSimulation(ts, 10);
+    // The whole frame is simulated now, in equal slices of at most 1/120 s, so
+    // bodies stay exactly in step with whatever scripts move every frame. (A
+    // fixed step with interpolation leaves them a fraction of a step behind,
+    // which shows as stutter next to anything script-driven.)
+    auto *world = (btDiscreteDynamicsWorld *)m_PhysicsWorld;
+    float frame = std::clamp((float)ts, 0.0f, 0.1f);
+    int slices = std::clamp((int)std::ceil(frame * 120.0f), 1, 12);
+
+    // Kinematic bodies are driven by their entity transform, not the solver.
+    // They cross the frame's movement one slice at a time, which is what gives
+    // them the right velocity when they push something.
+    struct KinematicMove {
+      btRigidBody *Body;
+      btTransform From, To;
+    };
+    std::vector<KinematicMove> moves;
+    for (auto &entity : m_Entities) {
+      if (!entity.HasRigidBody || !entity.RigidBody.RuntimeBody ||
+          entity.RigidBody.Type != RigidBodyComponent::BodyType::Kinematic)
+        continue;
+      auto *body = (btRigidBody *)entity.RigidBody.RuntimeBody;
+      if (!body->getMotionState())
+        continue;
+      btTransform trans;
+      trans.setIdentity();
+      trans.setOrigin(btVector3(entity.Transform.Translation.x,
+                                entity.Transform.Translation.y,
+                                entity.Transform.Translation.z));
+      glm::quat q(entity.Transform.Rotation);
+      trans.setRotation(btQuaternion(q.x, q.y, q.z, q.w));
+      moves.push_back({body, body->getWorldTransform(), trans});
+    }
+
+    for (int slice = 1; slice <= slices; ++slice) {
+      btScalar t = (btScalar)slice / (btScalar)slices;
+      for (auto &move : moves) {
+        btTransform now(
+            move.From.getRotation().slerp(move.To.getRotation(), t),
+            move.From.getOrigin().lerp(move.To.getOrigin(), t));
+        move.Body->getMotionState()->setWorldTransform(now);
+      }
+      if (frame > 0.0f)
+        world->stepSimulation(frame / (float)slices, 0);
+    }
 
     {
       auto primaryCameraEntity = GetPrimaryCameraEntity();
@@ -173,6 +225,8 @@ void Scene::OnUpdate(float ts) {
 
     for (auto &entity : m_Entities) {
       if (entity.HasRigidBody && entity.RigidBody.RuntimeBody) {
+        if (entity.RigidBody.Type == RigidBodyComponent::BodyType::Kinematic)
+          continue;
         btRigidBody *body = (btRigidBody *)entity.RigidBody.RuntimeBody;
         if (body && body->getMotionState()) {
           btTransform trans;
@@ -259,6 +313,18 @@ void Scene::OnImGuiRender() {
       entity.m_NativeScript.Instance->OnImGuiRender();
     }
   }
+}
+
+void Scene::OnLateUpdate(float ts) {
+  for (auto &entity : m_Entities)
+    if (entity.HasScript && entity.m_NativeScript.Instance)
+      entity.m_NativeScript.Instance->OnLateUpdate(ts);
+}
+
+void Scene::OnWorldUIRender() {
+  for (auto &entity : m_Entities)
+    if (entity.HasScript && entity.m_NativeScript.Instance)
+      entity.m_NativeScript.Instance->OnWorldUIRender();
 }
 
 Entity Scene::GetEntityByUUID(UUID uuid) {
@@ -674,6 +740,16 @@ void Scene::OnPhysicsStart() {
       if (entity.RigidBody.FixedRotation) {
         body->setAngularFactor(btVector3(0, 0, 0));
       }
+      body->setFriction(entity.RigidBody.Friction);
+      body->setRestitution(entity.RigidBody.Restitution);
+      body->setUserIndex(entity.GetID());
+      if (mass != 0.0f)
+        UpdateContinuousCollision(body);
+      if (entity.RigidBody.Type == RigidBodyComponent::BodyType::Kinematic) {
+        body->setCollisionFlags(body->getCollisionFlags() |
+                                btCollisionObject::CF_KINEMATIC_OBJECT);
+        body->setActivationState(DISABLE_DEACTIVATION);
+      }
 
       entity.RigidBody.RuntimeBody = body;
       ((btDiscreteDynamicsWorld *)m_PhysicsWorld)->addRigidBody(body);
@@ -689,6 +765,10 @@ void Scene::OnPhysicsStop() {
     delete (btCollisionDispatcher *)m_Dispatcher;
     delete (btDefaultCollisionConfiguration *)m_CollisionConfiguration;
     m_PhysicsWorld = nullptr;
+    m_Solver = nullptr;
+    m_Broadphase = nullptr;
+    m_Dispatcher = nullptr;
+    m_CollisionConfiguration = nullptr;
   }
 }
 
@@ -698,6 +778,152 @@ void ScriptableEntity::ApplyForce(const glm::vec3 &force) {
     body->activate(true);
     body->applyCentralForce(btVector3(force.x, force.y, force.z));
   }
+}
+
+void ScriptableEntity::ApplyImpulse(const glm::vec3 &impulse) {
+  if (m_Entity && m_Entity->HasRigidBody && m_Entity->RigidBody.RuntimeBody) {
+    btRigidBody *body = (btRigidBody *)m_Entity->RigidBody.RuntimeBody;
+    body->activate(true);
+    body->applyCentralImpulse(btVector3(impulse.x, impulse.y, impulse.z));
+  }
+}
+
+void ScriptableEntity::Teleport(const glm::vec3 &position) {
+  if (!m_Entity)
+    return;
+  m_Entity->Transform.Translation = position;
+  if (m_Entity->HasRigidBody && m_Entity->RigidBody.RuntimeBody) {
+    btRigidBody *body = (btRigidBody *)m_Entity->RigidBody.RuntimeBody;
+    btTransform trans = body->getWorldTransform();
+    trans.setOrigin(btVector3(position.x, position.y, position.z));
+    body->setWorldTransform(trans);
+    body->setInterpolationWorldTransform(trans);
+    if (body->getMotionState())
+      body->getMotionState()->setWorldTransform(trans);
+    body->activate(true);
+  }
+}
+
+namespace {
+struct IgnoreEntityRayCallback : btCollisionWorld::ClosestRayResultCallback {
+  int IgnoreID;
+  bool IncludeGhosts;
+  IgnoreEntityRayCallback(const btVector3 &from, const btVector3 &to, int ignoreID,
+                          bool includeGhosts)
+      : ClosestRayResultCallback(from, to), IgnoreID(ignoreID),
+        IncludeGhosts(includeGhosts) {}
+
+  bool needsCollision(btBroadphaseProxy *proxy) const override {
+    auto *object = (const btCollisionObject *)proxy->m_clientObject;
+    if (object && object->getUserIndex() == IgnoreID)
+      return false;
+    if (object && !IncludeGhosts &&
+        (object->getCollisionFlags() & btCollisionObject::CF_NO_CONTACT_RESPONSE))
+      return false;
+    return ClosestRayResultCallback::needsCollision(proxy);
+  }
+};
+}
+
+bool Scene::Raycast(const glm::vec3 &from, const glm::vec3 &to,
+                    RaycastHit &outHit, int ignoreEntityID,
+                    bool includeGhosts) const {
+  if (!m_PhysicsWorld)
+    return false;
+
+  btVector3 btFrom(from.x, from.y, from.z);
+  btVector3 btTo(to.x, to.y, to.z);
+  IgnoreEntityRayCallback callback(btFrom, btTo, ignoreEntityID, includeGhosts);
+  ((btDiscreteDynamicsWorld *)m_PhysicsWorld)->rayTest(btFrom, btTo, callback);
+  if (!callback.hasHit())
+    return false;
+
+  const btVector3 &p = callback.m_hitPointWorld;
+  const btVector3 &n = callback.m_hitNormalWorld;
+  outHit.Point = {p.x(), p.y(), p.z()};
+  outHit.Normal = {n.x(), n.y(), n.z()};
+  outHit.Distance = glm::distance(from, outHit.Point);
+  outHit.EntityID = callback.m_collisionObject->getUserIndex();
+  outHit.Velocity = {0.0f, 0.0f, 0.0f};
+  if (const btRigidBody *body = btRigidBody::upcast(callback.m_collisionObject)) {
+    btVector3 v = body->getVelocityInLocalPoint(p - body->getCenterOfMassPosition());
+    outHit.Velocity = {v.x(), v.y(), v.z()};
+  }
+  return true;
+}
+
+void Scene::SetEntityPose(Entity &entity, const glm::vec3 &position,
+                          const glm::vec3 &rotation) {
+  entity.Transform.Translation = position;
+  entity.Transform.Rotation = rotation;
+  if (!m_PhysicsWorld || !entity.HasRigidBody || !entity.RigidBody.RuntimeBody)
+    return;
+  auto *body = (btRigidBody *)entity.RigidBody.RuntimeBody;
+  glm::quat q(rotation);
+  btTransform trans(btQuaternion(q.x, q.y, q.z, q.w),
+                    btVector3(position.x, position.y, position.z));
+  body->setWorldTransform(trans);
+  body->setInterpolationWorldTransform(trans);
+  if (body->getMotionState())
+    body->getMotionState()->setWorldTransform(trans);
+  body->activate(true);
+}
+
+void Scene::SetEntityVelocity(Entity &entity, const glm::vec3 &linear,
+                              const glm::vec3 &angular) {
+  if (!m_PhysicsWorld || !entity.HasRigidBody || !entity.RigidBody.RuntimeBody)
+    return;
+  auto *body = (btRigidBody *)entity.RigidBody.RuntimeBody;
+  body->activate(true);
+  body->setLinearVelocity(btVector3(linear.x, linear.y, linear.z));
+  body->setAngularVelocity(btVector3(angular.x, angular.y, angular.z));
+}
+
+void Scene::SetEntitySolid(Entity &entity, bool solid) {
+  if (!m_PhysicsWorld || !entity.HasRigidBody || !entity.RigidBody.RuntimeBody)
+    return;
+  auto *body = (btRigidBody *)entity.RigidBody.RuntimeBody;
+  int flags = body->getCollisionFlags();
+  bool isSolid = (flags & btCollisionObject::CF_NO_CONTACT_RESPONSE) == 0;
+  if (isSolid == solid)
+    return;
+  body->setCollisionFlags(solid ? (flags & ~btCollisionObject::CF_NO_CONTACT_RESPONSE)
+                                : (flags | btCollisionObject::CF_NO_CONTACT_RESPONSE));
+  body->activate(true);
+}
+
+void Scene::SetEntityColliderScale(Entity &entity, const glm::vec3 &scale) {
+  if (!m_PhysicsWorld || !entity.HasRigidBody || !entity.RigidBody.RuntimeBody)
+    return;
+  auto *body = (btRigidBody *)entity.RigidBody.RuntimeBody;
+  auto *world = (btDiscreteDynamicsWorld *)m_PhysicsWorld;
+  btCollisionShape *shape = body->getCollisionShape();
+  btVector3 wanted(scale.x, scale.y, scale.z);
+  if (!shape || shape->getLocalScaling().distance2(wanted) < 1e-8f)
+    return;
+
+  shape->setLocalScaling(wanted);
+  if (body->getInvMass() > 0.0f) {
+    btScalar mass = 1.0f / body->getInvMass();
+    btVector3 inertia(0, 0, 0);
+    shape->calculateLocalInertia(mass, inertia);
+    body->setMassProps(mass, inertia);
+    body->updateInertiaTensor();
+  }
+  if (body->getInvMass() > 0.0f)
+    UpdateContinuousCollision(body);
+  // Contacts cached for the old size are no longer valid.
+  world->getBroadphase()->getOverlappingPairCache()->cleanProxyFromPairs(
+      body->getBroadphaseHandle(), world->getDispatcher());
+  world->updateSingleAabb(body);
+  body->activate(true);
+}
+
+glm::vec3 Scene::GetEntityVelocity(const Entity &entity) const {
+  if (!m_PhysicsWorld || !entity.HasRigidBody || !entity.RigidBody.RuntimeBody)
+    return {0.0f, 0.0f, 0.0f};
+  const btVector3 &v = ((btRigidBody *)entity.RigidBody.RuntimeBody)->getLinearVelocity();
+  return {v.x(), v.y(), v.z()};
 }
 
 void ScriptableEntity::SetLinearVelocity(const glm::vec3 &velocity) {

@@ -130,6 +130,14 @@ struct MeshRendererComponent {
 
   bool  IsReflective = false;
 
+  // Drawn in front of the rest of the scene, like a first-person weapon:
+  // world geometry never hides it. Meant to be toggled by scripts.
+  bool  Overlay = false;
+
+  // Left out of the camera's view but still drawn into the shadow maps: the
+  // head of a first-person character, which the camera sits inside of.
+  bool  ShadowOnly = false;
+
   MeshRendererComponent() = default;
   MeshRendererComponent(const MeshRendererComponent &) = default;
 };
@@ -147,10 +155,14 @@ public:
   virtual void OnDestroy() {}
   virtual void OnUpdate(float ts) {}
   virtual void OnImGuiRender() {}
+  virtual void OnLateUpdate(float ts) {}
+  virtual void OnWorldUIRender() {}
 
   void ApplyForce(const glm::vec3 &force);
+  void ApplyImpulse(const glm::vec3 &impulse);
   void SetLinearVelocity(const glm::vec3 &velocity);
   glm::vec3 GetLinearVelocity();
+  void Teleport(const glm::vec3 &position);
   void LoadScene(const std::string &path);
 
   Entity *m_Entity = nullptr;

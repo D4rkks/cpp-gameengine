@@ -4,6 +4,7 @@
 #include <GL/glew.h>
 #include <iostream>
 #include <unordered_map>
+#include <algorithm>
 
 namespace Engine {
 
@@ -25,7 +26,7 @@ std::shared_ptr<Texture2D> Texture2D::GetOrLoad(const std::string &path) {
 void Texture2D::ClearCache() { s_TextureCache.clear(); }
 
 Texture2D::Texture2D(const std::string &path)
-    : m_Path(path), m_Width(0), m_Height(0), m_Channels(0) {
+    : m_Path(path), m_RendererID(0), m_Width(0), m_Height(0), m_Channels(0) {
 
   stbi_set_flip_vertically_on_load(1);
   unsigned char *data =
@@ -44,6 +45,11 @@ Texture2D::Texture2D(const std::string &path)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
                     GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    if (GLEW_EXT_texture_filter_anisotropic) {
+      float limit = 1.0f;
+      glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &limit);
+      glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, std::min(8.0f, limit));
+    }
 
     glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, m_Width, m_Height, 0,
                  dataFormat, GL_UNSIGNED_BYTE, data);

@@ -1,17 +1,19 @@
 #pragma once
 
+#include "../Core/EngineAPI.h"
 #include <glm/glm.hpp>
 #include <cstdint>
 #include <memory>
 
 struct SDL_Window;
 typedef void* SDL_GLContext;
+struct ImDrawList;
 
 namespace Engine {
 
 struct VRSystemImpl;
 
-class VRSystem {
+class ENGINE_API VRSystem {
 public:
     VRSystem();
     ~VRSystem();
@@ -20,8 +22,13 @@ public:
     void Shutdown();
 
     bool IsActive() const;
+    bool IsAvailable() const;
+    bool IsFocused() const;
+    bool HasTracking() const;
 
     bool BeginFrame();
+    // Refresh predicted poses after simulation, without resampling buttons.
+    void RefreshTracking();
 
     void EndFrame();
 
@@ -29,13 +36,41 @@ public:
     uint32_t GetEyeWidth()  const;
     uint32_t GetEyeHeight() const;
 
-    void BindEyeFramebuffer(int eye);
+    bool BindEyeFramebuffer(int eye);
     void UnbindEyeFramebuffer(int eye);
 
     glm::mat4 GetEyeViewMatrix(int eye)                          const;
     glm::mat4 GetEyeProjectionMatrix(int eye, float near, float far) const;
 
     glm::vec3 GetHMDPosition() const;
+    glm::mat4 GetHeadPose() const; // Raw OpenXR tracking space, in metres.
+    void SetTrackingOrigin(const glm::mat4& origin);
+    glm::mat4 GetTrackingOrigin() const;
+    glm::mat4 GetWorldHeadPose() const;
+    uint32_t GetReferenceSpaceRevision() const;
+
+    // Flat menus/build screens share the desktop image; gameplay is stereo.
+    void SetCinemaMode(bool enabled);
+    bool IsCinemaMode() const;
+    void SetUIInteractive(bool enabled);
+    bool IsUIInteractive() const;
+    bool GetUIPointer(glm::vec2& uv) const;
+    void RecenterUI();
+    void Pulse(int hand, float amplitude = 0.3f, float seconds = 0.035f);
+    void SetQuality(int quality);
+    int GetQuality() const;
+    float GetRenderScale() const;
+    void SetUIAspect(float aspect);
+    bool BindUIFramebuffer();
+    void UnbindUIFramebuffer();
+    enum : uint32_t { kUIWidth = 2048, kUIHeight = 1152 };
+
+    // Pixel artwork rendered as depth-tested billboards in the stereo scene.
+    void BeginWorldUIFrame();
+    ImDrawList* GetWorldUIDrawList();
+    void SetWorldUIAnchor(const glm::vec3& position, const glm::vec2& pixelOrigin, float metersPerPixel);
+    void SetWorldUITransform(const glm::mat4& pixelToWorld);
+    void RenderWorldUI(const glm::mat4& viewProjection);
 
     struct HandState {
         bool      Active      = false;

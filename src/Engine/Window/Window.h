@@ -10,6 +10,7 @@ struct WindowProps {
   std::string Title;
   int Width;
   int Height;
+  bool VR = false;
 
   WindowProps(const std::string &title = "My Engine", int width = 1280,
               int height = 720)
@@ -32,6 +33,12 @@ public:
   SDL_Window *GetNativeWindow() const { return m_Window; }
   SDL_GLContext GetContext() const { return m_Context; }
 
+  // Tela cheia "de mesa" (ocupa o monitor sem trocar a resolucao dele) e
+  // sincronia vertical. Para os jogos, que nao chamam o SDL direto.
+  void SetFullscreen(bool fullscreen);
+  bool IsFullscreen() const;
+  void SetVSync(bool enabled);
+
 private:
   void Init(const WindowProps &props);
   void Shutdown();
@@ -44,6 +51,7 @@ private:
     std::string Title;
     int Width;
     int Height;
+    bool VSync = true;
   };
 
   WindowData m_Data;

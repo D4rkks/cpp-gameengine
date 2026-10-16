@@ -11,6 +11,20 @@ namespace Engine {
 
 Window::Window(const WindowProps &props) { Init(props); }
 
+void Window::SetFullscreen(bool fullscreen) {
+  SDL_SetWindowFullscreen(m_Window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+}
+
+bool Window::IsFullscreen() const {
+  return (SDL_GetWindowFlags(m_Window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+}
+
+void Window::SetVSync(bool enabled) {
+  if (m_Data.VSync == enabled) return;
+  m_Data.VSync = enabled;
+  SDL_GL_SetSwapInterval(enabled ? 1 : 0);
+}
+
 Window::~Window() { Shutdown(); }
 
 void Window::Init(const WindowProps &props) {
@@ -27,15 +41,15 @@ void Window::Init(const WindowProps &props) {
 
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, 0);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, props.VR ? 4 : 3);
+  SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, props.VR ? 5 : 3);
 
   SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
   SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
   SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 
-  SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
-  SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 4);
+  SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, props.VR ? 0 : 1);
+  SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, props.VR ? 0 : 4);
 
   auto window_flags =
       (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
@@ -52,6 +66,15 @@ void Window::Init(const WindowProps &props) {
   }
 
   m_Context = SDL_GL_CreateContext(m_Window);
+  if (!m_Context && props.VR) {
+    std::cerr << "[VR] OpenGL 4.5 unavailable; trying desktop OpenGL 3.3.\n";
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    m_Context = SDL_GL_CreateContext(m_Window);
+  }
+  if (!m_Context) {
+    throw std::runtime_error("Error: OpenGL 3.3 context: " + std::string(SDL_GetError()));
+  }
   SDL_GL_MakeCurrent(m_Window, m_Context);
   SDL_GL_SetSwapInterval(1);
 
